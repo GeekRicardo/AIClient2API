@@ -700,6 +700,8 @@ process_single_account() {
         --disable-features=FocusMode
         --silent-launch
         --disable-blink-features=AutomationControlled
+        --disable-features=ChromeSignin
+        --disable-signin-promo
     )
 
     # 如果启用代理，添加代理参数
@@ -1144,21 +1146,59 @@ process_single_account() {
 
     # 如果在授权页面，先切换语言到美国，然后点击 Continue
     if [[ "$CURRENT_URL" == *"kiro"* ]]; then
-        log_info "OAuth 授权中..."
+        log_info "检测到 Kiro OAuth 授权页面"
 
         # 尝试切换语言到英语（美国）
+        log_info "  [校验] 尝试切换语言到英语"
         sleep 2
-        playwright-cli click "getByRole('combobox')" > /dev/null 2>&1 || true
-        sleep 1
-        playwright-cli click "getByRole('option', { name: 'English (United States)' })" > /dev/null 2>&1 || \
-        playwright-cli click "getByRole('option', { name: 'English' })" > /dev/null 2>&1 || true
-        sleep 1
+
+        # 检查是否有语言选择框
+        local has_combobox=$(playwright-cli --raw eval "document.querySelector('[role=combobox]') !== null" 2>/dev/null || echo "false")
+        log_info "  [校验] 语言选择框存在: $has_combobox"
+
+        if [[ "$has_combobox" == "true" ]]; then
+            playwright-cli click "getByRole('combobox')" > /dev/null 2>&1 || true
+            sleep 1
+
+            # 尝试点击英语选项
+            if playwright-cli click "getByRole('option', { name: 'English (United States)' })" > /dev/null 2>&1; then
+                log_success "  [校验通过] 已切换到英语（美国）"
+            elif playwright-cli click "getByRole('option', { name: 'English' })" > /dev/null 2>&1; then
+                log_success "  [校验通过] 已切换到英语"
+            else
+                log_warning "  [校验] 未找到英语选项，使用当前语言"
+            fi
+            sleep 1
+        else
+            log_info "  [校验] 未找到语言选择框，跳过语言切换"
+        fi
 
         # 点击 Continue 按钮（多语言尝试）
-        playwright-cli click "getByRole('button', { name: 'Continue' })" > /dev/null 2>&1 || \
-        playwright-cli click "getByRole('button', { name: 'Tiếp tục' })" > /dev/null 2>&1 || \
-        playwright-cli click "getByRole('button', { name: '继续' })" > /dev/null 2>&1 || true
-        log_success "已授权"
+        log_info "  [校验] 查找并点击 Continue 按钮"
+
+        # 检查页面上的所有按钮
+        local buttons=$(playwright-cli --raw eval "Array.from(document.querySelectorAll('button')).map(b => b.textContent.trim()).join('|')" 2>/dev/null || echo "")
+        log_info "  [校验] 页面按钮: ${buttons:0:150}"
+
+        local clicked=false
+        if playwright-cli click "getByRole('button', { name: 'Continue' })" > /dev/null 2>&1; then
+            log_success "  [校验通过] 已点击 Continue 按钮"
+            clicked=true
+        elif playwright-cli click "getByRole('button', { name: 'Tiếp tục' })" > /dev/null 2>&1; then
+            log_success "  [校验通过] 已点击 Tiếp tục 按钮"
+            clicked=true
+        elif playwright-cli click "getByRole('button', { name: '继续' })" > /dev/null 2>&1; then
+            log_success "  [校验通过] 已点击继续按钮"
+            clicked=true
+        else
+            log_warning "  [校验失败] 未找到 Continue 按钮，可能需要人工介入"
+        fi
+
+        if [ "$clicked" = true ]; then
+            log_success "已授权"
+        else
+            log_warning "授权可能未完成，等待人工确认..."
+        fi
         sleep 5
     fi
 
@@ -1288,6 +1328,18 @@ EOF
     echo ""
 }
 
+# 注释掉批量文件中的指定行
+comment_out_line() {
+    local file="$1"
+    local line_number="$2"
+
+    # 使用 sed 在指定行开头添加 #（如果还没有 #）
+    sed -i.bak "${line_number}s/^[^#]/# &/" "$file"
+    rm -f "${file}.bak"
+
+    log_info "  [标记] 已在文件中注释掉第 $line_number 行"
+}
+
 # 批量处理模式
 batch_process() {
     log_batch "=========================================="
@@ -1297,8 +1349,11 @@ batch_process() {
 
     # 解析批量文件（兼容不支持 mapfile 的 shell）
     local accounts=()
+    local account_lines=()  # 存储每个账号对应的原始行内容
+
     while IFS= read -r line; do
         accounts+=("$line")
+        account_lines+=("$line")
     done < <(parse_batch_file "$BATCH_FILE")
 
     if [ ${#accounts[@]} -eq 0 ]; then
@@ -1311,6 +1366,7 @@ batch_process() {
 
     local success_count=0
     local fail_count=0
+    local failed_emails=()
 
     for i in "${!accounts[@]}"; do
         local account_info=$(extract_account_info "${accounts[$i]}")
@@ -1322,8 +1378,13 @@ batch_process() {
 
             if process_single_account "$email" "$password" "$totp" "$((i+1))"; then
                 ((success_count++))
+                # 成功后在文件中注释掉包含该邮箱的行
+                sed -i.bak "/^[^#].*${email}/s/^/# /" "$BATCH_FILE"
+                rm -f "${BATCH_FILE}.bak"
+                log_info "  [标记] 已在文件中注释掉账号: $email"
             else
                 ((fail_count++))
+                failed_emails+=("$email")
             fi
 
             # 账号之间等待一段时间
@@ -1334,6 +1395,11 @@ batch_process() {
         else
             log_error "账号 $((i+1)) 信息不完整，跳过"
             ((fail_count++))
+            if [ -n "$email" ]; then
+                failed_emails+=("$email")
+            else
+                failed_emails+=("账号 $((i+1)) (邮箱未知)")
+            fi
         fi
     done
 
@@ -1342,7 +1408,17 @@ batch_process() {
     log_batch "批量处理完成"
     log_batch "=========================================="
     log_success "成功: $success_count 个账号"
-    log_error "失败: $fail_count 个账号"
+
+    # 只有失败时才输出失败信息
+    if [ $fail_count -gt 0 ]; then
+        log_error "失败: $fail_count 个账号"
+        echo ""
+        log_error "失败账号列表:"
+        for failed_email in "${failed_emails[@]}"; do
+            log_error "  - $failed_email"
+        done
+    fi
+
     log_info "Session 文件保存在: $SESSION_DIR"
     echo ""
 }

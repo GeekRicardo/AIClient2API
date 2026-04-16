@@ -10,7 +10,7 @@ let currentFilters = {
     status: '',
     provider: ''
 };
-let currentSection = 'metadata';
+let currentSection = 'messages';
 
 /**
  * 初始化 AI Monitor
@@ -199,12 +199,12 @@ function renderTraceSidebar(detail) {
     if (!sidebar) return;
 
     const sections = [
-        { id: 'metadata', icon: '📋', label: '元数据' },
         { id: 'messages', icon: '💬', label: '对话消息', show: detail.original_request?.messages || detail.processed_request?.messages },
         { id: 'input', icon: '📥', label: '请求详情' },
         { id: 'output', icon: '📤', label: '响应详情', show: detail.native_response || detail.converted_response },
         { id: 'stream', icon: '⚡', label: '流式输出', show: detail.is_stream && detail.stream_chunks },
-        { id: 'conversion', icon: '🔄', label: '协议转换', show: detail.from_provider !== detail.to_provider }
+        { id: 'conversion', icon: '🔄', label: '协议转换', show: detail.from_provider !== detail.to_provider },
+        { id: 'metadata', icon: '📋', label: '元数据' }
     ].filter(s => s.show !== false);
 
     sidebar.innerHTML = sections.map(section => `
@@ -266,6 +266,16 @@ function renderRequestDetail(detail) {
             header.parentElement.classList.toggle('expanded');
         });
     });
+
+    // 如果是消息部分，自动滚动到底部
+    if (currentSection === 'messages') {
+        setTimeout(() => {
+            const messagesContainer = document.getElementById('messagesContainer');
+            if (messagesContainer) {
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+        }, 100);
+    }
 }
 
 /**
@@ -349,11 +359,25 @@ function renderMessagesSection(detail) {
 
     return `
         <div class="trace-section">
-            <h3 class="trace-section-title">
-                <span class="section-icon">💬</span>
-                对话消息 (${messages.length})
-            </h3>
-            <div class="messages-container">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                <h3 class="trace-section-title" style="margin: 0;">
+                    <span class="section-icon">💬</span>
+                    对话消息 (${messages.length})
+                </h3>
+                <div class="messages-scroll-controls">
+                    <button class="scroll-control-btn" onclick="window.scrollMessagesToTop()" title="滚动到顶部">
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                            <path d="M8 3L3 8h3v5h4V8h3L8 3z" fill="currentColor"/>
+                        </svg>
+                    </button>
+                    <button class="scroll-control-btn" onclick="window.scrollMessagesToBottom()" title="滚动到底部">
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                            <path d="M8 13l5-5h-3V3H6v5H3l5 5z" fill="currentColor"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <div class="messages-container" id="messagesContainer">
                 ${messages.map((msg, idx) => renderMessage(msg, idx)).join('')}
             </div>
         </div>
@@ -506,6 +530,9 @@ function renderMessage(msg, index) {
         textContent = textItems.map(item => item.text).join('\n\n');
     }
 
+    // 判断是否有文本内容可以显示
+    const hasTextContent = textContent && textContent.trim().length > 0;
+
     // 渲染其他内容（图片、工具调用等）
     let otherContentHtml = '';
     if (Array.isArray(msg.content)) {
@@ -563,24 +590,23 @@ function renderMessage(msg, index) {
             <div class="message-content-wrapper">
                 <div class="message-header">
                     <div class="message-role-label">${role}</div>
-                    ${textContent ? `
+                    ${hasTextContent ? `
                         <div class="message-view-toggle">
                             <button class="view-toggle-btn active" data-view="markdown" data-message-id="${messageId}" onclick="window.toggleMessageView('${messageId}', 'markdown')">
-                                <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                         <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
                                     <path d="M2 3h12v10H2V3zm1 1v8h10V4H3zm2 6V6l2 2 2-2v4H7V8L5 10z" fill="currentColor"/>
                                 </svg>
                                 Markdown
                             </button>
                             <button class="view-toggle-btn" data-view="json" data-message-id="${messageId}" onclick="window.toggleMessageView('${messageId}', 'json')">
-                                <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-                                    <path d="M4 2H2v2h2V2zm0 4H2v2h2V6zm0 4H2v2h2v-2zm12-8h-2v2h2V2zm0 4h-2v2h2V6zm0 4h-2v2h2v-2zM8 2H6v2h2V2zm0 4H6v2h2V6zm0 4H6v2h2v-2z" fill="currentColor"/>
+                                <svg width="12" height="12" viewBox="0 0 16 16" fill="none">                             <path d="M4 2H2v2h2V2zm0 4H2v2h2V6zm0 4H2v2h2v-2zm12-8h-2v2h2V2zm0 4h-2v2h2V6zm0 4h-2v2h2v-2zM8 2H6v2h2V2zm0 4H6v2h2V6zm0 4H6v2h2v-2z" fill="currentColor"/>
                                 </svg>
                                 JSON
                             </button>
                         </div>
                     ` : ''}
                 </div>
-                ${textContent ? `
+                ${hasTextContent ? `
                     <!-- Markdown 视图 -->
                     <div class="message-view" data-view="markdown" data-message-id="${messageId}">
                         <div class="message-content-markdown">${renderMarkdown(textContent)}</div>
@@ -941,7 +967,7 @@ function closeDetailModal() {
     const modal = document.getElementById('aiMonitorDetailModal');
     if (modal) {
         modal.style.display = 'none';
-        currentSection = 'metadata';
+        currentSection = 'messages';
     }
 }
 
@@ -1119,6 +1145,26 @@ window.toggleMessageView = function(messageId, view) {
             viewEl.classList.add('hidden');
         }
     });
+};
+
+/**
+ * 滚动消息到顶部
+ */
+window.scrollMessagesToTop = function() {
+    const messagesContainer = document.getElementById('messagesContainer');
+    if (messagesContainer) {
+        messagesContainer.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+};
+
+/**
+ * 滚动消息到底部
+ */
+window.scrollMessagesToBottom = function() {
+    const messagesContainer = document.getElementById('messagesContainer');
+    if (messagesContainer) {
+        messagesContainer.scrollTo({ top: messagesContainer.scrollHeight, behavior: 'smooth' });
+    }
 };
 
 function debounce(func, wait) {

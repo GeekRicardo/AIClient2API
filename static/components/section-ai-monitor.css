@@ -609,6 +609,34 @@
     display: flex;
     flex-direction: column;
     gap: 1rem;
+    max-height: 70vh;
+    overflow-y: auto;
+    padding-right: 0.5rem;
+}
+
+.messages-scroll-controls {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.scroll-control-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: var(--monitor-surface);
+    border: 1px solid var(--monitor-border);
+    border-radius: 6px;
+    color: var(--monitor-text-secondary);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.scroll-control-btn:hover {
+    background: var(--monitor-surface-hover);
+    color: var(--monitor-primary);
+    border-color: var(--monitor-primary);
 }
 
 .message-bubble {
