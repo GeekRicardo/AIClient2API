@@ -16,6 +16,7 @@ import * as customModelsApi from '../ui-modules/custom-models-api.js';
 import * as accessApi from '../ui-modules/access-api.js';
 import * as eventBroadcast from '../ui-modules/event-broadcast.js';
 import { HELP_DATA, API_GUIDE_DATA, API_EXAMPLES, formatHelpText, formatApiGuideText } from '../utils/docs-data.js';
+import * as aiMonitorApi from '../ui-modules/ai-monitor-api.js';
 
 // Re-export from event-broadcast module
 export { broadcastEvent, initializeUIManagement, handleUploadOAuthCredentials, upload } from '../ui-modules/event-broadcast.js';
@@ -441,6 +442,21 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         if (method === 'DELETE') {
             return await customModelsApi.handleDeleteCustomModel(req, res, currentConfig, modelId);
         }
+    }
+
+    // AI Monitor API
+    if (method === 'GET' && pathParam === '/api/ai-monitor/requests') {
+        return await aiMonitorApi.handleGetAIRequests(req, res);
+    }
+
+    const aiMonitorDetailMatch = pathParam.match(/^\/api\/ai-monitor\/requests\/(.+)$/);
+    if (method === 'GET' && aiMonitorDetailMatch) {
+        const requestId = decodeURIComponent(aiMonitorDetailMatch[1]);
+        return await aiMonitorApi.handleGetAIRequestDetail(req, res, requestId);
+    }
+
+    if (method === 'POST' && pathParam === '/api/ai-monitor/cleanup') {
+        return await aiMonitorApi.handleCleanupOldRecords(req, res);
     }
 
     return false;

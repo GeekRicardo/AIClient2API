@@ -38,6 +38,13 @@ const translations = {
         'nav.models': '可用模型',
         'nav.customModels': '自定义模型',
         'nav.playground': '模型测试',
+        'nav.aiMonitor': 'AI 请求监控',
+
+        // AI Monitor
+        'aiMonitor.title': 'AI 请求监控',
+        'aiMonitor.description': '追踪和分析 AI 请求的完整链路，包含协议转换详情',
+        'aiMonitor.refresh': '刷新',
+        'aiMonitor.cleanup': '清理旧记录',
 
         // Dashboard
         'dashboard.title': '系统概览',
@@ -1142,7 +1149,15 @@ const translations = {
         'nav.models': 'Available Models',
         'nav.customModels': 'Custom Models',
         'nav.playground': 'Playground',
-        
+        'nav.aiMonitor': 'AI Monitor',
+
+        // AI Monitor
+        'aiMonitor.title': 'AI Request Monitor',
+        'aiMonitor.description': 'Trace and analyze AI requests with detailed protocol conversion insights',
+        'aiMonitor.refresh': 'Refresh',
+        'aiMonitor.cleanup': 'Cleanup',
+
+
         // Dashboard
         'dashboard.title': 'System Overview',
         'dashboard.uptime': 'Uptime',

@@ -1,0 +1,102 @@
+<section id="ai-monitor" class="section">
+    <div class="ai-monitor-header">
+        <div class="header-content">
+            <h2 class="monitor-title">
+                <span class="title-icon">🔍</span>
+                <span data-i18n="aiMonitor.title">AI Request Monitor</span>
+            </h2>
+            <p class="monitor-subtitle" data-i18n="aiMonitor.description">
+                Trace and analyze AI requests with detailed protocol conversion insights
+            </p>
+        </div>
+        <div class="header-actions">
+            <button id="refreshRequestsBtn" class="action-btn primary">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M13.65 2.35C12.2 0.9 10.21 0 8 0 3.58 0 0.01 3.58 0.01 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L9 7h7V0l-2.35 2.35z" fill="currentColor"/>
+                </svg>
+                <span data-i18n="aiMonitor.refresh">Refresh</span>
+            </button>
+            <button id="cleanupOldBtn" class="action-btn secondary">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M5 1h6v1H5V1zm7 2H4v11c0 .55.45 1 1 1h6c.55 0 1-.45 1-1V3zm-8 0H2v1h1v10c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V4h1V3h-2V1c0-.55-.45-1-1-1H5c-.55 0-1 .45-1 1v2z" fill="currentColor"/>
+                </svg>
+                <span data-i18n="aiMonitor.cleanup">Cleanup</span>
+            </button>
+        </div>
+    </div>
+
+    <div class="ai-monitor-container">
+        <!-- 过滤栏 -->
+        <div class="monitor-filters">
+            <div class="filter-group">
+                <label class="filter-label">Status</label>
+                <select id="statusFilter" class="filter-select">
+                    <option value="">All</option>
+                    <option value="success">Success</option>
+                    <option value="error">Error</option>
+                    <option value="processing">Processing</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label class="filter-label">Provider</label>
+                <input type="text" id="providerFilter" placeholder="Filter by provider..." class="filter-input">
+            </div>
+            <div class="filter-stats">
+                <span id="totalRequests" class="stat-badge">0 requests</span>
+            </div>
+        </div>
+
+        <!-- 请求列表 -->
+        <div class="requests-grid" id="requestsListContainer">
+            <div class="loading-state">
+                <div class="loading-spinner"></div>
+                <span data-i18n="aiMonitor.loading">Loading traces...</span>
+            </div>
+        </div>
+
+        <!-- 分页 -->
+        <div class="monitor-pagination">
+            <button id="prevPageBtn" class="page-btn" disabled>
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Previous
+            </button>
+            <span id="pageInfo" class="page-info">Page 1</span>
+            <button id="nextPageBtn" class="page-btn">
+                Next
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+</section>
+
+<!-- 详情弹窗 -->
+<div id="aiMonitorDetailModal" class="trace-modal" style="display: none;">
+    <div class="trace-modal-overlay"></div>
+    <div class="trace-modal-container">
+        <div class="trace-modal-header">
+            <div class="trace-header-left">
+                <span class="trace-icon">📊</span>
+                <h3 id="modalRequestId" class="trace-title">Request Trace</h3>
+            </div>
+            <button id="closeModalBtn" class="trace-close-btn">
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                    <path d="M15 5L5 15M5 5l10 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+        <div class="trace-modal-body">
+            <div class="trace-sidebar" id="traceSidebar">
+                <!-- 导航树将由 JS 填充 -->
+            </div>
+            <div class="trace-content" id="requestDetailContent">
+                <!-- 详情内容将由 JS 动态填充 -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<link rel="stylesheet" href="components/section-ai-monitor.css">

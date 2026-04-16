@@ -106,6 +106,10 @@ import {
     loadPlaygroundData
 } from './playground-manager.js';
 
+import {
+    initAIMonitor
+} from './ai-monitor-manager.js';
+
 let isAppInitialized = false;
 
 /**
@@ -163,6 +167,7 @@ function initApp() {
     initPluginManager(); // 初始化插件管理功能
     initTutorialManager(); // 初始化教程管理功能
     initPlaygroundManager(); // 初始化 Playground
+    initAIMonitor(); // 初始化 AI 监控功能
     initMobileMenu(); // 初始化移动端菜单
     loadInitialData();
     

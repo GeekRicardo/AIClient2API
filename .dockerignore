@@ -19,3 +19,18 @@ babel.config.js
 tests/
 run-tests.js
 test-summary.js
+
+# 排除敏感配置和账号数据
+configs/kiro/
+configs/gemini/
+configs/provider_pools.json
+configs/token-store.json
+configs/pwd
+configs/config.json
+
+# 排除日志文件
+logs/
+*.log
+
+# 排除脚本目录
+scripts/
