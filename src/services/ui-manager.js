@@ -193,6 +193,14 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         return await providerApi.handleSingleProviderHealthCheck(req, res, currentConfig, providerPoolManager, providerType, providerUuid);
     }
 
+    // Query credits usage for a specific Kiro provider node
+    const creditsUsageMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/([^\/]+)\/credits$/);
+    if (method === 'GET' && creditsUsageMatch) {
+        const providerType = decodeURIComponent(creditsUsageMatch[1]);
+        const providerUuid = creditsUsageMatch[2];
+        return await providerApi.handleGetKiroCredits(req, res, currentConfig, providerPoolManager, providerType, providerUuid);
+    }
+
     // Delete all unhealthy providers for a specific type
     // NOTE: This must be before the generic /{providerType}/{uuid} route to avoid matching 'delete-unhealthy' as UUID
     const deleteUnhealthyMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/delete-unhealthy$/);

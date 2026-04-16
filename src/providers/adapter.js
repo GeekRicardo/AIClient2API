@@ -427,6 +427,18 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
     }
 
     /**
+     * 查询 Kiro Credits 使用情况
+     * @returns {Promise<Object>} Credits 使用情况
+     */
+    async getCreditsUsage() {
+        if (!this.kiroApiService.isInitialized) {
+            logger.warn("kiroApiService not initialized, attempting to re-initialize...");
+            await this.kiroApiService.initialize();
+        }
+        return this.kiroApiService.getCreditsUsage();
+    }
+
+    /**
      * Count tokens for a message request (compatible with Anthropic API)
      * @param {Object} requestBody - The request body containing model, messages, system, tools, etc.
      * @returns {Object} { input_tokens: number }

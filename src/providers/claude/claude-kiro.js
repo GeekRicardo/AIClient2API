@@ -545,7 +545,10 @@ export class KiroApiService {
             // 配置自定义代理
             configureAxiosProxy(axiosConfig, this.config, this.config.MODEL_PROVIDER || MODEL_PROVIDER.KIRO_API);
         }
-        
+
+        // 配置自定义代理
+        configureAxiosProxy(axiosConfig, this.config, 'claude-kiro-oauth');
+
         this.axiosInstance = axios.create(axiosConfig);
 
         axiosConfig.headers = new Headers();
@@ -3157,6 +3160,57 @@ async saveCredentialsToFile(filePath, newData) {
             
             logger.error('[Kiro] Failed to fetch usage limits:', formattedError.message, error);
             throw formattedError;
+        }
+    }
+
+    /**
+     * 查询 Kiro Credits 使用情况（用于提供商池管理）
+     * 使用 Web Portal API 获取详细的 credits 信息
+     * @returns {Promise<Object>} Credits 使用情况
+     */
+    async getCreditsUsage() {
+        if (!this.isInitialized) await this.initialize();
+
+        try {
+            // 导入 API 模块
+            const { getKiroCredits } = await import('../../utils/kiro-credits-api.js');
+            const { getKiroUserInfo } = await import('../../utils/kiro-user-info-api.js');
+
+            // 从凭证中提取 accessToken
+            const accessToken = this.accessToken;
+            if (!accessToken) {
+                throw new Error('缺少必需的凭证信息: accessToken');
+            }
+
+            // 先获取用户信息（包括 userId）
+            logger.info('[Kiro] 获取用户信息...');
+            const userInfo = await getKiroUserInfo({
+                accessToken,
+                profileArn: this.profileArn
+            });
+
+            const userId = userInfo.userId;
+            const visitorId = this.config.KIRO_VISITOR_ID || '';
+
+            logger.info(`[Kiro] 用户信息获取成功: ${userInfo.email} (${userId})`);
+
+            // 调用 credits API
+            const result = await getKiroCredits({
+                accessToken,
+                userId,
+                visitorId
+            });
+
+            // 添加用户信息到结果中
+            result.email = userInfo.email;
+            result.userId = userId;
+
+            logger.info(`[Kiro] Credits 查询成功: ${result.totalUsed}/${result.totalAvailable} (${Math.round((result.totalUsed / result.totalAvailable) * 100)}%)`);
+
+            return result;
+        } catch (error) {
+            logger.error(`[Kiro] Credits 查询失败: ${error.message}`);
+            throw error;
         }
     }
 }

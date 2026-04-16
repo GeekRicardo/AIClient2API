@@ -1601,3 +1601,67 @@ async function _handleRefreshProviderUuid(req, res, currentConfig, providerPoolM
         return true;
     }
 }
+
+/**
+ * 查询 Kiro 提供商的 Credits 使用情况
+ */
+export async function handleGetKiroCredits(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
+    try {
+        if (!providerPoolManager) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'Provider pool manager not initialized' } }));
+            return true;
+        }
+
+        // 只支持 Kiro 相关提供商
+        const KIRO_PROVIDER_TYPES = ['kiro-api', 'claude-kiro-oauth', 'kiro'];
+        if (!KIRO_PROVIDER_TYPES.some(t => providerType.includes(t) || providerType.toLowerCase().includes('kiro'))) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: `Credits query only supported for Kiro providers, got: ${providerType}` } }));
+            return true;
+        }
+
+        const providers = providerPoolManager.providerStatus[providerType] || [];
+        const providerStatus = providers.find(item => item.config?.uuid === providerUuid);
+
+        if (!providerStatus) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'Provider not found' } }));
+            return true;
+        }
+
+        logger.info(`[UI API] Querying credits for Kiro provider ${providerUuid}`);
+
+        // 获取服务实例（key 格式为 providerType + uuid）
+        const providerConfig = providerStatus.config;
+        const providerKey = (providerConfig.MODEL_PROVIDER || providerType) + providerUuid;
+        const serviceInstance = serviceInstances[providerKey];
+        if (!serviceInstance || !serviceInstance.getCreditsUsage) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: `Service instance not found or does not support credits query (key: ${providerKey})` } }));
+            return true;
+        }
+
+        // 调用 getCreditsUsage 方法
+        const creditsInfo = await serviceInstance.getCreditsUsage();
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            providerType,
+            uuid: providerUuid,
+            credits: creditsInfo
+        }));
+        return true;
+    } catch (error) {
+        logger.error('[UI API] Get Kiro credits error:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+            error: { 
+                message: error.message,
+                details: error.stack 
+            } 
+        }));
+        return true;
+    }
+}
