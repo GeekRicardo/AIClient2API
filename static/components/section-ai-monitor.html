@@ -1,100 +1,108 @@
 <section id="ai-monitor" class="section">
-    <div class="ai-monitor-header">
-        <div class="header-content">
-            <h2 class="monitor-title">
-                <span class="title-icon">🔍</span>
-                <span data-i18n="aiMonitor.title">AI Request Monitor</span>
-            </h2>
-            <p class="monitor-subtitle" data-i18n="aiMonitor.description">
+    <div class="lf-page-header">
+        <div class="lf-page-header-left">
+            <h2 class="lf-page-title" data-i18n="aiMonitor.title">Tracing</h2>
+            <p class="lf-page-subtitle" data-i18n="aiMonitor.description">
                 Trace and analyze AI requests with detailed protocol conversion insights
             </p>
         </div>
-        <div class="header-actions">
-            <button id="refreshRequestsBtn" class="action-btn primary">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <path d="M13.65 2.35C12.2 0.9 10.21 0 8 0 3.58 0 0.01 3.58 0.01 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L9 7h7V0l-2.35 2.35z" fill="currentColor"/>
+        <div class="lf-page-header-actions">
+            <button id="refreshRequestsBtn" class="lf-btn lf-btn-ghost" title="Refresh">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path d="M13.65 2.35A7.95 7.95 0 008 0C3.58 0 .01 3.58.01 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4a6 6 0 01-6-6c0-3.31 2.69-6 6-6 1.66 0 3.14.69 4.22 1.78L9 7h7V0l-2.35 2.35z" fill="currentColor"/>
                 </svg>
                 <span data-i18n="aiMonitor.refresh">Refresh</span>
             </button>
-            <button id="cleanupOldBtn" class="action-btn secondary">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <path d="M5 1h6v1H5V1zm7 2H4v11c0 .55.45 1 1 1h6c.55 0 1-.45 1-1V3zm-8 0H2v1h1v10c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V4h1V3h-2V1c0-.55-.45-1-1-1H5c-.55 0-1 .45-1 1v2z" fill="currentColor"/>
+            <button id="cleanupOldBtn" class="lf-btn lf-btn-ghost" title="Cleanup old records">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path d="M6 2h4v1h3v1H3V3h3V2zm-1 3h6v9H5V5zm1 1v7h4V6H6z" fill="currentColor"/>
                 </svg>
                 <span data-i18n="aiMonitor.cleanup">Cleanup</span>
             </button>
         </div>
     </div>
 
-    <div class="ai-monitor-container">
-        <!-- 过滤栏 -->
-        <div class="monitor-filters">
-            <div class="filter-group">
-                <label class="filter-label">Status</label>
-                <select id="statusFilter" class="filter-select">
+    <div class="lf-toolbar">
+        <div class="lf-toolbar-filters">
+            <div class="lf-filter">
+                <label class="lf-filter-label">Status</label>
+                <select id="statusFilter" class="lf-select">
                     <option value="">All</option>
                     <option value="success">Success</option>
                     <option value="error">Error</option>
                     <option value="processing">Processing</option>
                 </select>
             </div>
-            <div class="filter-group">
-                <label class="filter-label">Provider</label>
-                <input type="text" id="providerFilter" placeholder="Filter by provider..." class="filter-input">
-            </div>
-            <div class="filter-stats">
-                <span id="totalRequests" class="stat-badge">0 requests</span>
+            <div class="lf-filter">
+                <label class="lf-filter-label">Provider</label>
+                <input type="text" id="providerFilter" placeholder="Filter by provider..." class="lf-input">
             </div>
         </div>
+        <div class="lf-toolbar-meta">
+            <span id="totalRequests" class="lf-meta-count">0 traces</span>
+        </div>
+    </div>
 
-        <!-- 请求列表 -->
-        <div class="requests-grid" id="requestsListContainer">
-            <div class="loading-state">
-                <div class="loading-spinner"></div>
-                <span data-i18n="aiMonitor.loading">Loading traces...</span>
-            </div>
-        </div>
+    <div id="activeFilters" class="lf-active-filters" style="display: none;"></div>
 
-        <!-- 分页 -->
-        <div class="monitor-pagination">
-            <button id="prevPageBtn" class="page-btn" disabled>
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                Previous
-            </button>
-            <span id="pageInfo" class="page-info">Page 1</span>
-            <button id="nextPageBtn" class="page-btn">
-                Next
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-            </button>
+    <div class="lf-table-wrapper" id="requestsListContainer">
+        <div class="lf-empty">
+            <div class="lf-spinner"></div>
+            <span data-i18n="aiMonitor.loading">Loading traces…</span>
         </div>
+    </div>
+
+    <div class="lf-pagination">
+        <button id="prevPageBtn" class="lf-btn lf-btn-ghost lf-btn-sm" disabled>
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Previous
+        </button>
+        <span id="pageInfo" class="lf-page-info">Page 1</span>
+        <button id="nextPageBtn" class="lf-btn lf-btn-ghost lf-btn-sm">
+            Next
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+        </button>
     </div>
 </section>
 
-<!-- 详情弹窗 -->
-<div id="aiMonitorDetailModal" class="trace-modal" style="display: none;">
-    <div class="trace-modal-overlay"></div>
-    <div class="trace-modal-container">
-        <div class="trace-modal-header">
-            <div class="trace-header-left">
-                <span class="trace-icon">📊</span>
-                <h3 id="modalRequestId" class="trace-title">Request Trace</h3>
+<div id="aiMonitorDetailModal" class="lf-modal" style="display: none;">
+    <div class="lf-modal-overlay"></div>
+    <div class="lf-modal-container">
+        <div class="lf-modal-header">
+            <div class="lf-modal-header-left">
+                <span class="lf-modal-label">Trace</span>
+                <span id="modalRequestId" class="lf-modal-id">—</span>
+                <button id="copyRequestIdBtn" class="lf-icon-btn" title="Copy ID">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                        <path d="M4 4h8v8H4V4zm1 1v6h6V5H5z" fill="currentColor"/>
+                        <path d="M2 2h8v1H3v7H2V2z" fill="currentColor"/>
+                    </svg>
+                </button>
             </div>
-            <button id="closeModalBtn" class="trace-close-btn">
-                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                    <path d="M15 5L5 15M5 5l10 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                </svg>
-            </button>
+            <div class="lf-modal-header-actions">
+                <button id="closeModalBtn" class="lf-icon-btn" title="Close">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                        <path d="M12 4L4 12M4 4l8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+            </div>
         </div>
-        <div class="trace-modal-body">
-            <div class="trace-sidebar" id="traceSidebar">
-                <!-- 导航树将由 JS 填充 -->
-            </div>
-            <div class="trace-content" id="requestDetailContent">
-                <!-- 详情内容将由 JS 动态填充 -->
-            </div>
+
+        <div class="lf-modal-meta" id="traceMetaBar">
+            <!-- meta pills 由 JS 填充 -->
+        </div>
+
+        <div class="lf-modal-body">
+            <aside class="lf-nav" id="traceSidebar">
+                <!-- 导航由 JS 填充 -->
+            </aside>
+            <main class="lf-content" id="requestDetailContent">
+                <!-- 内容由 JS 填充 -->
+            </main>
         </div>
     </div>
 </div>

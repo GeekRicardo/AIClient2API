@@ -1,69 +1,100 @@
 /**
- * AI Monitor 管理模块 - LangSmith 风格
+ * AI Monitor - Langfuse 风格
  */
 
 import { renderJsonTree, initJsonViewers } from './json-viewer.js';
 
-let currentPage = 0;
 const pageSize = 50;
-let currentFilters = {
-    status: '',
-    provider: ''
-};
-let currentSection = 'messages';
+let currentPage = 0;
+let currentFilters = { status: '', provider: '', session_id: '' };
+let currentSection = 'input';
+let currentDetail = null;
+const sectionViewMode = {};
+const messageCollapsed = {};
 
-/**
- * 初始化 AI Monitor
- */
+const URL_FILTER_KEYS = ['status', 'provider', 'session_id'];
+
+function readFiltersFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    URL_FILTER_KEYS.forEach(k => {
+        currentFilters[k] = params.get(k) || '';
+    });
+}
+
+function writeFiltersToUrl() {
+    const params = new URLSearchParams(window.location.search);
+    URL_FILTER_KEYS.forEach(k => {
+        if (currentFilters[k]) params.set(k, currentFilters[k]);
+        else params.delete(k);
+    });
+    const qs = params.toString();
+    const url = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
+    window.history.replaceState(null, '', url);
+}
+
+function applyFilterInputs() {
+    const st = document.getElementById('statusFilter');
+    const pv = document.getElementById('providerFilter');
+    if (st) st.value = currentFilters.status || '';
+    if (pv) pv.value = currentFilters.provider || '';
+}
+
 export function initAIMonitor() {
-    console.log('Initializing AI Monitor...');
-
-    // 绑定事件
     document.getElementById('refreshRequestsBtn')?.addEventListener('click', () => {
-        currentPage = 0; // 重置到第一页
+        currentPage = 0;
         loadRequests();
     });
     document.getElementById('cleanupOldBtn')?.addEventListener('click', handleCleanup);
     document.getElementById('statusFilter')?.addEventListener('change', handleFilterChange);
-    document.getElementById('providerFilter')?.addEventListener('input', debounce(handleFilterChange, 500));
+    document.getElementById('providerFilter')?.addEventListener('input', debounce(handleFilterChange, 400));
     document.getElementById('prevPageBtn')?.addEventListener('click', () => changePage(-1));
     document.getElementById('nextPageBtn')?.addEventListener('click', () => changePage(1));
     document.getElementById('closeModalBtn')?.addEventListener('click', closeDetailModal);
+    document.getElementById('copyRequestIdBtn')?.addEventListener('click', copyRequestId);
+    document.querySelector('.lf-modal-overlay')?.addEventListener('click', closeDetailModal);
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeDetailModal();
+    });
 
-    // 点击遮罩关闭
-    document.querySelector('.trace-modal-overlay')?.addEventListener('click', closeDetailModal);
+    // 浏览器前进后退：重新读取 URL 并刷新列表
+    window.addEventListener('popstate', () => {
+        readFiltersFromUrl();
+        applyFilterInputs();
+        currentPage = 0;
+        loadRequests();
+    });
 
-    // 加载初始数据（从第一页开始）
-    currentPage = 0;
+    readFiltersFromUrl();
+    applyFilterInputs();
     loadRequests();
 }
 
-/**
- * 加载请求列表
- */
+/* ───── 列表 ───── */
+
 async function loadRequests() {
     const container = document.getElementById('requestsListContainer');
     if (!container) return;
 
     container.innerHTML = `
-        <div class="loading-state">
-            <div class="loading-spinner"></div>
-            <span>Loading traces...</span>
+        <div class="lf-empty">
+            <div class="lf-spinner"></div>
+            <span>Loading traces…</span>
         </div>
     `;
+
+    renderActiveFilters();
 
     try {
         const params = new URLSearchParams({
             limit: pageSize,
             offset: currentPage * pageSize,
             ...(currentFilters.status && { status: currentFilters.status }),
-            ...(currentFilters.provider && { provider: currentFilters.provider })
+            ...(currentFilters.provider && { provider: currentFilters.provider }),
+            ...(currentFilters.session_id && { session_id: currentFilters.session_id })
         });
 
         const response = await fetch(`/api/ai-monitor/requests?${params}`, {
-            headers: {
-                'Authorization': `Bearer ${localStorage.getItem('authToken')}`
-            }
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('authToken')}` }
         });
 
         if (!response.ok) throw new Error('Failed to load requests');
@@ -73,952 +104,949 @@ async function loadRequests() {
         updatePagination(result.pagination);
         updateStats(result.data.length);
     } catch (error) {
-        console.error('Failed to load requests:', error);
         container.innerHTML = `
-            <div class="loading-state">
-                <span style="color: var(--monitor-error);">❌ Failed to load: ${error.message}</span>
+            <div class="lf-empty lf-empty-error">
+                <span>Failed to load: ${escapeHtml(error.message)}</span>
             </div>
         `;
     }
 }
 
-/**
- * 渲染请求列表
- */
 function renderRequestsList(requests) {
     const container = document.getElementById('requestsListContainer');
     if (!container) return;
 
-    if (requests.length === 0) {
-        container.innerHTML = `
-            <div class="loading-state">
-                <span>📭 No traces found</span>
-            </div>
-        `;
+    if (!requests.length) {
+        container.innerHTML = `<div class="lf-empty"><span>No traces found</span></div>`;
         return;
     }
 
-    container.innerHTML = requests.map(req => `
-        <div class="request-card" data-request-id="${req.request_id}">
-            <div class="request-card-header">
-                <div class="request-id-group">
-                    <div class="request-id">${req.request_id}</div>
-                    <div class="request-timestamp">${formatTimestamp(req.timestamp)}</div>
-                </div>
-                <span class="request-status-badge status-${req.status}">${req.status}</span>
-            </div>
-            ${req.user_query_preview ? `
-                <div class="request-query-preview">
-                    <span class="query-icon">💬</span>
-                    <span class="query-text">${escapeHtml(req.user_query_preview)}</span>
-                </div>
-            ` : ''}
-            <div class="request-card-body">
-                <div class="request-meta-item">
-                    <span class="meta-label">Provider</span>
-                    <span class="meta-value">${req.from_provider}${req.to_provider && req.from_provider !== req.to_provider ? ' → ' + req.to_provider : ''}</span>
-                </div>
-                <div class="request-meta-item">
-                    <span class="meta-label">Model</span>
-                    <span class="meta-value highlight">${req.model || 'N/A'}</span>
-                </div>
-                ${req.duration_ms ? `
-                <div class="request-meta-item">
-                    <span class="meta-label">Duration</span>
-                    <span class="meta-value">${req.duration_ms}ms</span>
-                </div>
-                ` : ''}
-                ${req.total_tokens ? `
-                <div class="request-meta-item">
-                    <span class="meta-label">Tokens</span>
-                    <span class="meta-value">${req.total_tokens}</span>
-                </div>
-                ` : ''}
-                ${req.is_stream ? '<span class="stream-badge">⚡ Stream</span>' : ''}
-            </div>
-        </div>
-    `).join('');
+    container.innerHTML = `
+        <table class="lf-table">
+            <thead>
+                <tr>
+                    <th style="width: 130px;">Time</th>
+                    <th>Name</th>
+                    <th>Model</th>
+                    <th>Protocol</th>
+                    <th style="width: 80px;">Latency</th>
+                    <th style="width: 120px;">Tokens</th>
+                    <th style="width: 90px;">Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${requests.map(req => renderTableRow(req)).join('')}
+            </tbody>
+        </table>
+    `;
 
-    // 绑定点击事件
-    container.querySelectorAll('.request-card').forEach(card => {
-        card.addEventListener('click', () => {
-            const requestId = card.dataset.requestId;
-            loadRequestDetail(requestId);
-        });
+    container.querySelectorAll('tr[data-request-id]').forEach(row => {
+        row.addEventListener('click', () => loadRequestDetail(row.dataset.requestId));
     });
 }
 
-/**
- * 加载请求详情
- */
+function renderTableRow(req) {
+    const protocolTxt = req.to_provider && req.from_provider !== req.to_provider
+        ? `${req.from_provider} → ${req.to_provider}`
+        : req.from_provider;
+
+    const previewText = req.user_query_preview?.trim() || req.request_id;
+    const tokens = req.total_tokens
+        ? `${formatNum(req.prompt_tokens || 0)} → ${formatNum(req.completion_tokens || 0)}`
+        : '—';
+    const latency = req.duration_ms != null ? formatDuration(req.duration_ms) : '—';
+
+    return `
+        <tr data-request-id="${escapeAttr(req.request_id)}">
+            <td class="lf-cell-time">${formatTimestamp(req.timestamp)}</td>
+            <td class="lf-cell-preview" title="${escapeAttr(previewText)}">
+                ${escapeHtml(previewText)}
+                ${req.is_stream ? '<span class="lf-tag">stream</span>' : ''}
+            </td>
+            <td class="lf-cell-model">${escapeHtml(req.model || '—')}</td>
+            <td class="lf-cell-model">${escapeHtml(protocolTxt || '—')}</td>
+            <td class="lf-cell-num">${latency}</td>
+            <td class="lf-cell-num">${tokens}</td>
+            <td><span class="lf-status status-${req.status}">${req.status || 'unknown'}</span></td>
+        </tr>
+    `;
+}
+
+/* ───── 详情 ───── */
+
 async function loadRequestDetail(requestId) {
     const modal = document.getElementById('aiMonitorDetailModal');
-    const sidebar = document.getElementById('traceSidebar');
     const content = document.getElementById('requestDetailContent');
     const title = document.getElementById('modalRequestId');
+    if (!modal || !content || !title) return;
 
-    if (!modal || !sidebar || !content || !title) return;
-
-    // 显示模态框
     modal.style.display = 'flex';
     title.textContent = requestId;
     content.innerHTML = `
-        <div class="loading-state">
-            <div class="loading-spinner"></div>
-            <span>Loading trace details...</span>
+        <div class="lf-empty">
+            <div class="lf-spinner"></div>
+            <span>Loading trace…</span>
         </div>
     `;
+    document.getElementById('traceMetaBar').innerHTML = '';
+    document.getElementById('traceSidebar').innerHTML = '';
 
     try {
         const response = await fetch(`/api/ai-monitor/requests/${encodeURIComponent(requestId)}`, {
-            headers: {
-                'Authorization': `Bearer ${localStorage.getItem('authToken')}`
-            }
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('authToken')}` }
         });
 
         if (!response.ok) throw new Error('Failed to load request detail');
 
         const result = await response.json();
-        renderTraceSidebar(result.data);
-        renderRequestDetail(result.data);
+        currentDetail = result.data;
+        currentSection = pickDefaultSection(currentDetail);
+        renderMetaBar(currentDetail);
+        renderNav(currentDetail);
+        renderCurrentSection();
     } catch (error) {
-        console.error('Failed to load request detail:', error);
         content.innerHTML = `
-            <div class="loading-state">
-                <span style="color: var(--monitor-error);">❌ Failed to load: ${error.message}</span>
+            <div class="lf-empty lf-empty-error">
+                <span>Failed to load: ${escapeHtml(error.message)}</span>
             </div>
         `;
     }
 }
 
-/**
- * 渲染侧边栏导航
- */
-function renderTraceSidebar(detail) {
-    const sidebar = document.getElementById('traceSidebar');
-    if (!sidebar) return;
+function renderMetaBar(detail) {
+    const bar = document.getElementById('traceMetaBar');
+    if (!bar) return;
 
-    const sections = [
-        { id: 'messages', icon: '💬', label: '对话消息', show: detail.original_request?.messages || detail.processed_request?.messages },
-        { id: 'input', icon: '📥', label: '请求详情' },
-        { id: 'output', icon: '📤', label: '响应详情', show: detail.native_response || detail.converted_response },
-        { id: 'stream', icon: '⚡', label: '流式输出', show: detail.is_stream && detail.stream_chunks },
-        { id: 'conversion', icon: '🔄', label: '协议转换', show: detail.from_provider !== detail.to_provider },
-        { id: 'metadata', icon: '📋', label: '元数据' }
-    ].filter(s => s.show !== false);
+    const pills = [];
 
-    sidebar.innerHTML = sections.map(section => `
-        <div class="trace-nav-item ${section.id === currentSection ? 'active' : ''}" data-section="${section.id}">
-            <span class="trace-nav-icon">${section.icon}</span>
-            <span>${section.label}</span>
-        </div>
-    `).join('');
+    pills.push(`<span class="lf-pill"><span class="lf-pill-label">Time:</span> ${formatTimestampFull(detail.timestamp)}</span>`);
 
-    // 绑定导航点击
-    sidebar.querySelectorAll('.trace-nav-item').forEach(item => {
-        item.addEventListener('click', () => {
-            currentSection = item.dataset.section;
-            sidebar.querySelectorAll('.trace-nav-item').forEach(i => i.classList.remove('active'));
-            item.classList.add('active');
-            renderRequestDetail(detail);
+    if (detail.duration_ms != null) {
+        pills.push(`<span class="lf-pill"><span class="lf-pill-label">Latency:</span> <span class="lf-pill-mono">${formatDuration(detail.duration_ms)}</span></span>`);
+    }
+
+    const protocol = detail.to_provider && detail.from_provider !== detail.to_provider
+        ? `${detail.from_provider} → ${detail.to_provider}`
+        : detail.from_provider;
+    if (protocol) {
+        pills.push(`<span class="lf-pill"><span class="lf-pill-label">Protocol:</span> <span class="lf-pill-mono">${escapeHtml(protocol)}</span></span>`);
+    }
+
+    if (detail.model) {
+        pills.push(`<span class="lf-pill lf-pill-accent"><span class="lf-pill-mono">${escapeHtml(detail.model)}</span></span>`);
+    }
+
+    if (detail.total_tokens) {
+        const prompt = formatNum(detail.prompt_tokens || 0);
+        const completion = formatNum(detail.completion_tokens || 0);
+        const total = formatNum(detail.total_tokens);
+        pills.push(`<span class="lf-pill"><span class="lf-pill-mono">${prompt} → ${completion}</span> <span class="lf-pill-label">(Σ ${total})</span></span>`);
+    }
+
+    if (detail.is_stream) {
+        pills.push(`<span class="lf-pill">stream</span>`);
+    }
+
+    if (detail.session_id) {
+        const active = currentFilters.session_id === detail.session_id;
+        pills.push(`
+            <span class="lf-pill lf-pill-session">
+                <span class="lf-pill-label">Session:</span>
+                <span class="lf-pill-mono" title="${escapeAttr(detail.session_id)}">${escapeHtml(detail.session_id.length > 10 ? detail.session_id.slice(0, 8) + '…' : detail.session_id)}</span>
+                <button class="lf-pill-action ${active ? 'active' : ''}" data-filter-session="${escapeAttr(detail.session_id)}" title="${active ? 'Session filter active' : 'Filter by this session'}">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                        <path d="M2 3h12l-5 6v4l-2 1V9L2 3z" fill="currentColor"/>
+                    </svg>
+                </button>
+            </span>
+        `);
+    }
+
+    pills.push(`<span class="lf-status status-${detail.status}">${detail.status || 'unknown'}</span>`);
+
+    bar.innerHTML = pills.join('');
+
+    bar.querySelectorAll('[data-filter-session]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            applySessionFilter(btn.dataset.filterSession);
         });
     });
 }
 
-/**
- * 渲染请求详情
- */
-function renderRequestDetail(detail) {
+function renderNav(detail) {
+    const sidebar = document.getElementById('traceSidebar');
+    if (!sidebar) return;
+
+    const messages = getMessages(detail);
+    const streamChunks = getStreamChunks(detail);
+
+    const sections = [
+        { id: 'input', label: 'Input', count: null, show: true },
+        { id: 'output', label: 'Output', count: null, show: !!(detail.converted_response || detail.native_response || streamChunks.length) },
+        { id: 'messages', label: 'Messages', count: messages.length, show: messages.length > 0 },
+        { id: 'stream', label: 'Stream', count: streamChunks.length, show: detail.is_stream && streamChunks.length > 0 },
+        { id: 'conversion', label: 'Conversion', count: null, show: detail.from_provider !== detail.to_provider && !!detail.to_provider },
+        { id: 'metadata', label: 'Metadata', count: null, show: true }
+    ].filter(s => s.show);
+
+    if (!sections.some(s => s.id === currentSection)) {
+        currentSection = sections[0]?.id || 'input';
+    }
+
+    sidebar.innerHTML = sections.map(s => `
+        <div class="lf-nav-item ${s.id === currentSection ? 'active' : ''}" data-section="${s.id}">
+            <span>${s.label}</span>
+            ${s.count != null ? `<span class="lf-nav-item-count">${s.count}</span>` : ''}
+        </div>
+    `).join('');
+
+    sidebar.querySelectorAll('.lf-nav-item').forEach(item => {
+        item.addEventListener('click', () => {
+            currentSection = item.dataset.section;
+            sidebar.querySelectorAll('.lf-nav-item').forEach(i => i.classList.toggle('active', i === item));
+            renderCurrentSection();
+        });
+    });
+}
+
+function pickDefaultSection(detail) {
+    if (getMessages(detail).length > 0) return 'messages';
+    if (detail.converted_response || detail.native_response) return 'output';
+    return 'input';
+}
+
+function renderCurrentSection() {
     const content = document.getElementById('requestDetailContent');
-    if (!content) return;
+    if (!content || !currentDetail) return;
 
-    let html = '';
-
+    let html;
     switch (currentSection) {
-        case 'metadata':
-            html = renderMetadataSection(detail);
-            break;
-        case 'messages':
-            html = renderMessagesSection(detail);
-            break;
-        case 'input':
-            html = renderInputSection(detail);
-            break;
-        case 'output':
-            html = renderOutputSection(detail);
-            break;
-        case 'stream':
-            html = renderStreamSection(detail);
-            break;
-        case 'conversion':
-            html = renderConversionSection(detail);
-            break;
+        case 'input':      html = renderInputSection(currentDetail); break;
+        case 'output':     html = renderOutputSection(currentDetail); break;
+        case 'messages':   html = renderMessagesSection(currentDetail); break;
+        case 'stream':     html = renderStreamSection(currentDetail); break;
+        case 'conversion': html = renderConversionSection(currentDetail); break;
+        case 'metadata':   html = renderMetadataSection(currentDetail); break;
+        default:           html = '';
     }
 
     content.innerHTML = html;
-
-    // 初始化 JSON 查看器
     initJsonViewers(content);
+    bindSectionEvents(content);
 
-    // 绑定工具调用展开事件
-    content.querySelectorAll('.tool-call-header').forEach(header => {
-        header.addEventListener('click', () => {
+    if (currentSection === 'messages') {
+        // 默认滚动到最新消息
+        requestAnimationFrame(() => { content.scrollTop = content.scrollHeight; });
+    } else {
+        content.scrollTop = 0;
+    }
+}
+
+function bindSectionEvents(root) {
+    // Formatted / JSON tabs
+    root.querySelectorAll('[data-tab-group]').forEach(group => {
+        const groupName = group.dataset.tabGroup;
+        group.querySelectorAll('.lf-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                const mode = tab.dataset.tab;
+                sectionViewMode[groupName] = mode;
+                group.querySelectorAll('.lf-tab').forEach(t => t.classList.toggle('active', t === tab));
+                const scope = root.querySelector(`[data-tab-target="${groupName}"]`) || root;
+                scope.querySelectorAll(`[data-tab-view]`).forEach(v => {
+                    if (v.dataset.tabGroup && v.dataset.tabGroup !== groupName) return;
+                    v.style.display = v.dataset.tabView === mode ? '' : 'none';
+                });
+            });
+        });
+    });
+
+    // Tool call expand — 点击左侧标题/箭头区域，忽略 tabs
+    root.querySelectorAll('.lf-tool-call-header').forEach(header => {
+        header.addEventListener('click', (e) => {
+            if (e.target.closest('.lf-tabs')) return;
             header.parentElement.classList.toggle('expanded');
         });
     });
 
-    // 如果是消息部分，自动滚动到底部
-    if (currentSection === 'messages') {
-        setTimeout(() => {
-            const messagesContainer = document.getElementById('messagesContainer');
-            if (messagesContainer) {
-                messagesContainer.scrollTop = messagesContainer.scrollHeight;
-            }
-        }, 100);
-    }
-}
-
-/**
- * 渲染元数据部分
- */
-function renderMetadataSection(detail) {
-    return `
-        <div class="trace-section">
-            <h3 class="trace-section-title">
-                <span class="section-icon">📋</span>
-                Request Metadata
-            </h3>
-            <div class="metadata-grid">
-                <div class="metadata-item">
-                    <div class="metadata-label">Request ID</div>
-                    <div class="metadata-value">${detail.request_id}</div>
-                </div>
-                <div class="metadata-item">
-                    <div class="metadata-label">Timestamp</div>
-                    <div class="metadata-value">${formatTimestamp(detail.timestamp)}</div>
-                </div>
-                <div class="metadata-item">
-                    <div class="metadata-label">Protocol</div>
-                    <div class="metadata-value">${detail.from_provider}${detail.to_provider && detail.from_provider !== detail.to_provider ? ' → ' + detail.to_provider : ''}</div>
-                </div>
-                <div class="metadata-item">
-                    <div class="metadata-label">Model</div>
-                    <div class="metadata-value">${detail.model || 'N/A'}</div>
-                </div>
-                <div class="metadata-item">
-                    <div class="metadata-label">Status</div>
-                    <div class="metadata-value">
-                        <span class="request-status-badge status-${detail.status}">${detail.status}</span>
-                    </div>
-                </div>
-                <div class="metadata-item">
-                    <div class="metadata-label">Type</div>
-                    <div class="metadata-value">${detail.is_stream ? '⚡ Stream' : '📦 Unary'}</div>
-                </div>
-                ${detail.duration_ms ? `
-                <div class="metadata-item">
-                    <div class="metadata-label">Duration</div>
-                    <div class="metadata-value">${detail.duration_ms}ms</div>
-                </div>
-                ` : ''}
-                ${detail.total_tokens ? `
-                <div class="metadata-item">
-                    <div class="metadata-label">Tokens</div>
-                    <div class="metadata-value">${detail.prompt_tokens || 0} + ${detail.completion_tokens || 0} = ${detail.total_tokens}</div>
-                </div>
-                ` : ''}
-            </div>
-            ${detail.error_message ? `
-                <div class="metadata-item" style="margin-top: 1rem;">
-                    <div class="metadata-label">Error Message</div>
-                    <div class="code-block">
-                        <div class="code-content" style="color: var(--monitor-error);">${escapeHtml(detail.error_message)}</div>
-                    </div>
-                </div>
-            ` : ''}
-        </div>
-    `;
-}
-
-/**
- * 渲染消息部分
- */
-function renderMessagesSection(detail) {
-    let messages = detail.processed_request?.messages || detail.original_request?.messages || [];
-
-    // 如果是流式响应，需要从 stream_chunks 中重建 assistant 的回复
-    if (detail.is_stream && detail.stream_chunks) {
-        const chunks = detail.stream_chunks.converted || detail.stream_chunks.native || [];
-        const assistantMessage = reconstructAssistantMessage(chunks);
-
-        if (assistantMessage) {
-            // 将重建的 assistant 消息添加到消息列表
-            messages = [...messages, assistantMessage];
-        }
-    }
-
-    return `
-        <div class="trace-section">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
-                <h3 class="trace-section-title" style="margin: 0;">
-                    <span class="section-icon">💬</span>
-                    对话消息 (${messages.length})
-                </h3>
-                <div class="messages-scroll-controls">
-                    <button class="scroll-control-btn" onclick="window.scrollMessagesToTop()" title="滚动到顶部">
-                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                            <path d="M8 3L3 8h3v5h4V8h3L8 3z" fill="currentColor"/>
-                        </svg>
-                    </button>
-                    <button class="scroll-control-btn" onclick="window.scrollMessagesToBottom()" title="滚动到底部">
-                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                            <path d="M8 13l5-5h-3V3H6v5H3l5 5z" fill="currentColor"/>
-                        </svg>
-                    </button>
-                </div>
-            </div>
-            <div class="messages-container" id="messagesContainer">
-                ${messages.map((msg, idx) => renderMessage(msg, idx)).join('')}
-            </div>
-        </div>
-    `;
-}
-
-/**
- * 从流式 chunks 中重建 assistant 消息
- */
-function reconstructAssistantMessage(chunks) {
-    let textContent = '';
-    const toolCalls = [];
-    let stopReason = null;
-
-    for (const chunk of chunks) {
-        // OpenAI 格式
-        if (chunk.choices && chunk.choices[0]) {
-            const delta = chunk.choices[0].delta;
-
-            // 累积文本内容
-            if (delta?.content) {
-                textContent += delta.content;
-            }
-
-            // 累积 tool calls
-            if (delta?.tool_calls) {
-                for (const tc of delta.tool_calls) {
-                    const index = tc.index || 0;
-                    if (!toolCalls[index]) {
-                        toolCalls[index] = {
-                            id: tc.id || '',
-                            type: 'function',
-                            function: {
-                                name: tc.function?.name || '',
-                                arguments: ''
-                            }
-                        };
-                    }
-                    if (tc.function?.name) {
-                        toolCalls[index].function.name = tc.function.name;
-                    }
-                    if (tc.function?.arguments) {
-                        toolCalls[index].function.arguments += tc.function.arguments;
-                    }
-                }
-            }
-
-            // 获取 stop reason
-            if (chunk.choices[0].finish_reason) {
-                stopReason = chunk.choices[0].finish_reason;
-            }
-        }
-
-        // Anthropic 格式
-        if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'text_delta') {
-            textContent += chunk.delta.text;
-        }
-
-        if (chunk.type === 'content_block_start' && chunk.content_block?.type === 'tool_use') {
-            toolCalls.push({
-                id: chunk.content_block.id,
-                type: 'tool_use',
-                name: chunk.content_block.name,
-                input: {}
-            });
-        }
-
-        if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'input_json_delta') {
-            // Anthropic 的 tool input 是增量 JSON
-            const lastTool = toolCalls[toolCalls.length - 1];
-            if (lastTool) {
-                if (!lastTool.inputJson) {
-                    lastTool.inputJson = '';
-                }
-                lastTool.inputJson += chunk.delta.partial_json;
-            }
-        }
-
-        if (chunk.delta?.stop_reason) {
-            stopReason = chunk.delta.stop_reason;
-        }
-    }
-
-    // 如果没有任何内容，返回 null
-    if (!textContent && toolCalls.length === 0) {
-        return null;
-    }
-
-    // 构建 assistant 消息
-    const message = {
-        role: 'assistant',
-        content: []
-    };
-
-    // 添加文本内容
-    if (textContent) {
-        message.content.push({
-            type: 'text',
-            text: textContent
+    // Session filter 按钮（Metadata 页）
+    root.querySelectorAll('[data-filter-session]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            applySessionFilter(btn.dataset.filterSession);
         });
-    }
+    });
 
-    // 添加 tool calls
-    if (toolCalls.length > 0) {
-        // 处理 Anthropic 格式的 tool calls
-        for (const tc of toolCalls) {
-            if (tc.type === 'tool_use') {
-                try {
-                    tc.input = tc.inputJson ? JSON.parse(tc.inputJson) : {};
-                    delete tc.inputJson;
-                } catch (e) {
-                    tc.input = {};
-                }
-                message.content.push(tc);
-            }
-        }
+    // Message collapse toggle
+    root.querySelectorAll('[data-toggle-message]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const id = btn.dataset.toggleMessage;
+            messageCollapsed[id] = !messageCollapsed[id];
+            renderCurrentSection();
+        });
+    });
 
-        // 处理 OpenAI 格式的 tool calls
-        const openaiToolCalls = toolCalls.filter(tc => tc.type === 'function');
-        if (openaiToolCalls.length > 0) {
-            message.tool_calls = openaiToolCalls;
-        }
-    }
-
-    // 如果 content 是空数组，转为字符串
-    if (message.content.length === 0) {
-        message.content = '';
-    } else if (message.content.length === 1 && message.content[0].type === 'text') {
-        // 如果只有一个文本块，简化为字符串
-        message.content = message.content[0].text;
-    }
-
-    return message;
+    // Click header (not tabs) also collapses
+    root.querySelectorAll('.lf-message-header').forEach(header => {
+        header.addEventListener('click', (e) => {
+            if (e.target.closest('.lf-tabs')) return;
+            if (e.target.closest('[data-toggle-message]')) return;
+            const msg = header.closest('.lf-message');
+            if (!msg) return;
+            const id = msg.dataset.messageId;
+            if (!id) return;
+            messageCollapsed[id] = !messageCollapsed[id];
+            renderCurrentSection();
+        });
+    });
 }
 
-/**
- * 渲染单条消息
- */
-function renderMessage(msg, index) {
-    const role = msg.role || 'unknown';
-    const avatarEmoji = role === 'user' ? '👤' : role === 'assistant' ? '🤖' : '⚙️';
-    const messageId = `msg-${index}`;
+/* ───── Sections ───── */
 
-    // 提取文本内容
+function renderInputSection(detail) {
+    const request = detail.processed_request || detail.original_request;
+    if (!request) return emptyCard('No input data');
+
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    const lastUser = findLastUserMessage(messages);
+
+    if (!lastUser) {
+        // 没有 user 消息就退回完整请求视图（例如 responses API 的非对话场景）
+        return renderDataCard('Request Input', request, 'input');
+    }
+
+    return `
+        <div class="lf-section-header">
+            <h3 class="lf-section-title">Latest User Input</h3>
+            <span class="lf-section-hint">turn ${messages.indexOf(lastUser) + 1} / ${messages.length}</span>
+        </div>
+        <div class="lf-messages">
+            ${renderMessage(lastUser, 'input-latest')}
+        </div>
+    `;
+}
+
+function findLastUserMessage(messages) {
+    // 优先找有真实文本的 user 消息（跳过纯 tool_result 包装的 user）
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg.role !== 'user') continue;
+        if (typeof msg.content === 'string' && msg.content.trim()) return msg;
+        if (Array.isArray(msg.content)) {
+            const hasText = msg.content.some(c => c?.type === 'text' && c.text?.trim());
+            if (hasText) return msg;
+        }
+    }
+    // 兜底：最后一条 user（可能是 tool_result）
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') return messages[i];
+    }
+    return null;
+}
+
+function renderOutputSection(detail) {
+    let response = detail.converted_response || detail.native_response;
+    if (!response && detail.is_stream) {
+        const chunks = getStreamChunks(detail);
+        const reconstructed = reconstructAssistantMessage(chunks);
+        if (reconstructed) response = reconstructed;
+    }
+    if (!response) return emptyCard('No output data');
+    return renderDataCard('Response Output', response, 'output');
+}
+
+function renderMessagesSection(detail) {
+    let messages = getMessages(detail);
+
+    if (detail.is_stream) {
+        const chunks = getStreamChunks(detail);
+        const assistant = reconstructAssistantMessage(chunks);
+        if (assistant) messages = [...messages, assistant];
+    }
+
+    if (!messages.length) return emptyCard('No messages');
+
+    return `
+        <div class="lf-section-header">
+            <h3 class="lf-section-title">Messages <span class="lf-nav-item-count" style="margin-left: 0.375rem;">${messages.length}</span></h3>
+        </div>
+        <div class="lf-messages">
+            ${messages.map((msg, i) => renderMessage(msg, i)).join('')}
+        </div>
+    `;
+}
+
+function renderMessage(msg, index = 0) {
+    const role = msg.role || 'unknown';
+
+    // OpenAI tool 消息 → 渲染成独立 tool_result
+    if (role === 'tool') {
+        return renderStandaloneToolResult({
+            tool_use_id: msg.tool_call_id,
+            content: msg.content,
+            _raw: msg
+        }, `${index}-0`);
+    }
+
+    // 纯 tool_result 消息（通常是 user 包装的）→ 不展示 user 外壳，只保留 tool_result 卡片
+    if (Array.isArray(msg.content) && msg.content.length > 0 &&
+        msg.content.every(c => c.type === 'tool_result')) {
+        return msg.content.map((item, i) =>
+            renderStandaloneToolResult({ ...item, _raw: msg }, `${index}-${i}`)
+        ).join('');
+    }
+
     let textContent = '';
     if (typeof msg.content === 'string') {
         textContent = msg.content;
     } else if (Array.isArray(msg.content)) {
-        const textItems = msg.content.filter(item => item.type === 'text');
-        textContent = textItems.map(item => item.text).join('\n\n');
+        textContent = msg.content.filter(i => i.type === 'text').map(i => i.text).join('\n\n');
     }
+    const hasText = textContent && textContent.trim().length > 0;
 
-    // 判断是否有文本内容可以显示
-    const hasTextContent = textContent && textContent.trim().length > 0;
-
-    // 渲染其他内容（图片、工具调用等）
-    let otherContentHtml = '';
+    // parsed view 里的附属内容（工具调用、图片、工具结果等）
+    const extrasParts = [];
     if (Array.isArray(msg.content)) {
-        otherContentHtml = msg.content.map(item => {
-            if (item.type === 'image_url') {
-                return `<div class="message-content-box">🖼️ [Image]</div>`;
+        msg.content.forEach((item, i) => {
+            if (item.type === 'image_url' || item.type === 'image') {
+                extrasParts.push(`<div class="lf-tool-call" data-kind="image"><div class="lf-tool-call-header"><span class="lf-tool-call-name">[image attachment]</span></div></div>`);
             } else if (item.type === 'tool_use') {
-                return renderToolCall(item.name, item.input, item.id);
+                extrasParts.push(renderInlineToolBlock({
+                    kind: 'call',
+                    name: item.name,
+                    id: item.id,
+                    data: item.input,
+                    raw: item,
+                    groupKey: `tcall-${index}-${i}`
+                }));
             } else if (item.type === 'tool_result') {
-                // 尝试解析 tool_result 的内容
-                let resultData = item.content;
-                try {
-                    // 如果是 JSON 字符串，解析它
-                    if (typeof item.content === 'string') {
-                        resultData = JSON.parse(item.content);
-                    }
-                } catch (e) {
-                    // 如果解析失败，保持原样
-                    resultData = item.content;
-                }
-
-                return `
-                    <div class="tool-call-card tool-result-card">
-                        <div class="tool-call-header">
-                            <div class="tool-call-title">
-                                <span class="tool-call-icon">✅</span>
-                                Tool Result: ${item.tool_use_id}
-                            </div>
-                            <span class="tool-call-expand">▼</span>
-                        </div>
-                        <div class="tool-call-body">
-                            <div class="tool-call-content">
-                                ${typeof resultData === 'string' ? `<div class="message-content-box">${escapeHtml(resultData)}</div>` : renderJsonTree(resultData)}
-                            </div>
-                        </div>
-                    </div>
-                `;
+                let data = item.content;
+                if (typeof data === 'string') { try { data = JSON.parse(data); } catch { /* keep */ } }
+                extrasParts.push(renderInlineToolBlock({
+                    kind: 'result',
+                    name: `result:${item.tool_use_id || ''}`,
+                    id: item.tool_use_id,
+                    data,
+                    raw: item,
+                    groupKey: `tres-${index}-${i}`
+                }));
             }
-            return '';
-        }).join('');
+        });
     }
 
-    // OpenAI tool calls
-    if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
-        otherContentHtml += msg.tool_calls.map(tc => {
+    if (Array.isArray(msg.tool_calls)) {
+        msg.tool_calls.forEach((tc, i) => {
             const name = tc.function?.name || tc.name;
-            const args = tc.function?.arguments || tc.arguments || '{}';
-            return renderToolCall(name, JSON.parse(args), tc.id);
-        }).join('');
+            let args = tc.function?.arguments ?? tc.arguments ?? '{}';
+            try { args = typeof args === 'string' ? JSON.parse(args) : args; } catch { /* keep */ }
+            extrasParts.push(renderInlineToolBlock({
+                kind: 'call',
+                name,
+                id: tc.id,
+                data: args,
+                raw: tc,
+                groupKey: `tcall-fn-${index}-${i}`
+            }));
+        });
     }
+
+    const extras = extrasParts.join('');
+    const hasExtras = extrasParts.length > 0;
+    const hasBody = hasText || hasExtras;
+
+    const groupId = `msg-${index}-${role}`;
+    const mode = sectionViewMode[groupId] || 'formatted';
+    const collapsed = messageCollapsed[groupId] === true;
+    const preview = (textContent.split('\n')[0] || '').slice(0, 120);
 
     return `
-        <div class="message-bubble ${role}">
-            <div class="message-avatar">${avatarEmoji}</div>
-            <div class="message-content-wrapper">
-                <div class="message-header">
-                    <div class="message-role-label">${role}</div>
-                    ${hasTextContent ? `
-                        <div class="message-view-toggle">
-                            <button class="view-toggle-btn active" data-view="markdown" data-message-id="${messageId}" onclick="window.toggleMessageView('${messageId}', 'markdown')">
-                         <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-                                    <path d="M2 3h12v10H2V3zm1 1v8h10V4H3zm2 6V6l2 2 2-2v4H7V8L5 10z" fill="currentColor"/>
-                                </svg>
-                                Markdown
-                            </button>
-                            <button class="view-toggle-btn" data-view="json" data-message-id="${messageId}" onclick="window.toggleMessageView('${messageId}', 'json')">
-                                <svg width="12" height="12" viewBox="0 0 16 16" fill="none">                             <path d="M4 2H2v2h2V2zm0 4H2v2h2V6zm0 4H2v2h2v-2zm12-8h-2v2h2V2zm0 4h-2v2h2V6zm0 4h-2v2h2v-2zM8 2H6v2h2V2zm0 4H6v2h2V6zm0 4H6v2h2v-2z" fill="currentColor"/>
-                                </svg>
-                                JSON
-                            </button>
-                        </div>
-                    ` : ''}
-                </div>
-                ${hasTextContent ? `
-                    <!-- Markdown 视图 -->
-                    <div class="message-view" data-view="markdown" data-message-id="${messageId}">
-                        <div class="message-content-markdown">${renderMarkdown(textContent)}</div>
+        <div class="lf-message ${collapsed ? 'collapsed' : ''}" data-role="${escapeAttr(role)}" data-message-id="${groupId}">
+            <div class="lf-message-header">
+                <button class="lf-message-collapse" data-toggle-message="${groupId}" title="${collapsed ? 'Expand' : 'Collapse'}">
+                    <svg width="10" height="10" viewBox="0 0 16 16" fill="none" class="lf-collapse-chevron">
+                        <path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+                <span class="lf-message-role">${escapeHtml(role)}</span>
+                ${collapsed && preview ? `<span class="lf-message-preview">${escapeHtml(preview)}${textContent.length > 120 ? '…' : ''}</span>` : ''}
+                ${hasBody && !collapsed ? `
+                    <div class="lf-tabs" data-tab-group="${groupId}" style="margin-left: auto;">
+                        <button class="lf-tab ${mode === 'formatted' ? 'active' : ''}" data-tab="formatted">Parsed</button>
+                        <button class="lf-tab ${mode === 'json' ? 'active' : ''}" data-tab="json">JSON</button>
                     </div>
-                    <!-- JSON 视图 -->
-                    <div class="message-view hidden" data-view="json" data-message-id="${messageId}">
+                ` : ''}
+            </div>
+            <div class="lf-message-body" data-tab-target="${groupId}">
+                ${hasBody ? `
+                    <div data-tab-view="formatted" data-tab-group="${groupId}" style="${mode === 'formatted' ? '' : 'display:none;'}">
+                        ${hasText ? renderMarkdownWithGutter(textContent) : ''}
+                        ${extras}
+                    </div>
+                    <div data-tab-view="json" data-tab-group="${groupId}" style="${mode === 'json' ? '' : 'display:none;'}">
                         ${renderJsonTree(msg)}
                     </div>
                 ` : renderJsonTree(msg)}
-                ${otherContentHtml}
             </div>
         </div>
     `;
 }
 
 /**
- * 渲染工具调用
+ * tool_result 脱离 user 外壳的独立渲染（带 Parsed/JSON 切换）
  */
-function renderToolCall(name, input, id) {
-    return `
-        <div class="tool-call-card">
-            <div class="tool-call-header">
-                <div class="tool-call-title">
-                    <span class="tool-call-icon">🔧</span>
-                    ${name}
-                    ${id ? `<span style="color: var(--monitor-text-secondary); font-size: 0.75rem;">(${id})</span>` : ''}
-                </div>
-                <span class="tool-call-expand">▼</span>
-            </div>
-            <div class="tool-call-body">
-                <div class="tool-call-content">
-                    ${renderJsonTree(input)}
-                </div>
-            </div>
-        </div>
-    `;
-}
+function renderStandaloneToolResult(item, idSuffix) {
+    const groupId = `tres-std-${idSuffix}`;
+    const mode = sectionViewMode[groupId] || 'formatted';
+    const collapsed = messageCollapsed[groupId] === true;
+    let data = item.content;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { /* keep */ } }
 
-/**
- * 渲染输入部分
- */
-function renderInputSection(detail) {
-    const request = detail.processed_request || detail.original_request;
-    if (!request) return '<div class="loading-state"><span>No input data</span></div>';
+    const previewTxt = typeof item.content === 'string'
+        ? item.content.split('\n')[0].slice(0, 120)
+        : JSON.stringify(data).slice(0, 120);
 
     return `
-        <div class="trace-section">
-            <h3 class="trace-section-title">
-                <span class="section-icon">📥</span>
-                Request Input
-            </h3>
-            ${renderJsonTree(request)}
+        <div class="lf-message ${collapsed ? 'collapsed' : ''}" data-role="tool" data-message-id="${groupId}">
+            <div class="lf-message-header">
+                <button class="lf-message-collapse" data-toggle-message="${groupId}" title="${collapsed ? 'Expand' : 'Collapse'}">
+                    <svg width="10" height="10" viewBox="0 0 16 16" fill="none" class="lf-collapse-chevron">
+                        <path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+                <span class="lf-message-role">tool result</span>
+                ${item.tool_use_id ? `<span class="lf-tool-call-id">${escapeHtml(item.tool_use_id)}</span>` : ''}
+                ${collapsed && previewTxt ? `<span class="lf-message-preview">${escapeHtml(previewTxt)}</span>` : ''}
+                ${!collapsed ? `
+                    <div class="lf-tabs" data-tab-group="${groupId}" style="margin-left: auto;">
+                        <button class="lf-tab ${mode === 'formatted' ? 'active' : ''}" data-tab="formatted">Parsed</button>
+                        <button class="lf-tab ${mode === 'json' ? 'active' : ''}" data-tab="json">JSON</button>
+                    </div>
+                ` : ''}
+            </div>
+            <div class="lf-message-body" data-tab-target="${groupId}">
+                <div data-tab-view="formatted" data-tab-group="${groupId}" style="${mode === 'formatted' ? '' : 'display:none;'}">
+                    ${renderToolPayload(data)}
+                </div>
+                <div data-tab-view="json" data-tab-group="${groupId}" style="${mode === 'json' ? '' : 'display:none;'}">
+                    ${renderJsonTree(item._raw || item)}
+                </div>
+            </div>
         </div>
     `;
 }
 
 /**
- * 渲染输出部分
+ * Assistant 内联的 tool_call / tool_result 卡片，带 Parsed/JSON 切换
  */
-function renderOutputSection(detail) {
-    const response = detail.converted_response || detail.native_response;
-    if (!response) return '<div class="loading-state"><span>No output data</span></div>';
-
+function renderInlineToolBlock({ kind, name, id, data, raw, groupKey }) {
+    const mode = sectionViewMode[groupKey] || 'formatted';
+    const kindLabel = kind === 'result' ? 'Tool Result' : 'Tool Call';
     return `
-        <div class="trace-section">
-            <h3 class="trace-section-title">
-                <span class="section-icon">📤</span>
-                Response Output
-            </h3>
-            ${renderJsonTree(response)}
-        </div>
-    `;
-}
-
-/**
- * 渲染流式部分
- */
-function renderStreamSection(detail) {
-    if (!detail.stream_chunks) return '<div class="loading-state"><span>No stream data</span></div>';
-
-    const chunks = detail.stream_chunks.converted || detail.stream_chunks.native || [];
-
-    return `
-        <div class="trace-section">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
-                <h3 class="trace-section-title" style="margin: 0;">
-                    <span class="section-icon">⚡</span>
-                    Stream Chunks (${chunks.length})
-                </h3>
-                <div class="stream-view-toggle">
-                    <button class="toggle-btn" data-view="json" onclick="window.toggleStreamView('json')">
-                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                            <path d="M4 2H2v2h2V2zm0 4H2v2h2V6zm0 4H2v2h2v-2zm12-8h-2v2h2V2zm0 4h-2v2h2V6zm0 4h-2v2h2v-2zM8 2H6v2h2V2zm0 4H6v2h2V6zm0 4H6v2h2v-2z" fill="currentColor"/>
-                        </svg>
-                        JSON
-                    </button>
-                    <button class="toggle-btn active" data-view="text" onclick="window.toggleStreamView('text')">
-                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                            <path d="M2 3h12v2H2V3zm0 4h12v2H2V7zm0 4h8v2H2v-2z" fill="currentColor"/>
-                        </svg>
-                        Accumulated Text
-                    </button>
+        <div class="lf-tool-call expanded" data-kind="${kind}">
+            <div class="lf-tool-call-header">
+                <div class="lf-tool-call-name">
+                    <svg width="10" height="10" viewBox="0 0 16 16" fill="none" class="lf-tool-call-chevron">
+                        <path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span class="lf-tool-call-kind">${kindLabel}</span>
+                    <span>${escapeHtml(name || '')}</span>
+                    ${id ? `<span class="lf-tool-call-id">${escapeHtml(id)}</span>` : ''}
+                </div>
+                <div class="lf-tabs lf-tabs-sm" data-tab-group="${groupKey}">
+                    <button class="lf-tab ${mode === 'formatted' ? 'active' : ''}" data-tab="formatted">Parsed</button>
+                    <button class="lf-tab ${mode === 'json' ? 'active' : ''}" data-tab="json">JSON</button>
                 </div>
             </div>
-
-            <!-- JSON 视图 -->
-            <div class="stream-view" data-view="json" style="display: none;">
-                <div class="stream-chunks-container">
-                    ${chunks.map((chunk, idx) => {
-                        return `
-                            <div class="stream-chunk">
-                                <span class="chunk-index">#${idx + 1}</span>
-                                <div class="chunk-content">
-                                    ${renderJsonTree(chunk, { maxDepth: 2 })}
-                                </div>
-                            </div>
-                        `;
-                    }).join('')}
+            <div class="lf-tool-call-body" data-tab-target="${groupKey}">
+                <div data-tab-view="formatted" data-tab-group="${groupKey}" style="${mode === 'formatted' ? '' : 'display:none;'}">
+                    ${renderToolPayload(data)}
                 </div>
-            </div>
-
-            <!-- 累积文本视图 -->
-            <div class="stream-view" data-view="text">
-                <div class="accumulated-text-container">
-                    ${renderAccumulatedText(chunks)}
+                <div data-tab-view="json" data-tab-group="${groupKey}" style="${mode === 'json' ? '' : 'display:none;'}">
+                    ${renderJsonTree(raw)}
                 </div>
             </div>
         </div>
     `;
 }
 
-/**
- * 渲染累积文本
- */
-function renderAccumulatedText(chunks) {
-    let accumulatedText = '';
-    const metadata = [];
-
-    chunks.forEach((chunk, idx) => {
-        // 提取文本内容
-        const text = extractTextFromChunk(chunk);
-        if (text) {
-            accumulatedText += text;
-        }
-
-        // 提取元数据
-        const meta = extractMetadataFromChunk(chunk);
-        if (meta) {
-            metadata.push({ index: idx + 1, ...meta });
-        }
-    });
-
-    let html = '';
-
-    // 显示累积的文本
-    if (accumulatedText) {
-        html += `
-            <div class="accumulated-text-box">
-                <div class="accumulated-text-header">
-                    <span class="accumulated-text-icon">📝</span>
-                    <span class="accumulated-text-title">Accumulated Content</span>
-                </div>
-                <div class="accumulated-text-content">${escapeHtml(accumulatedText)}</div>
-            </div>
-        `;
+function renderToolPayload(data) {
+    if (data == null) return `<div class="lf-empty" style="padding: 0.75rem;"><span>(empty)</span></div>`;
+    if (typeof data === 'string') {
+        return renderPlainTextWithGutter(data);
     }
+    return renderJsonTree(data);
+}
 
-    // 显示元数据
-    if (metadata.length > 0) {
-        html += `
-            <div class="stream-metadata-box">
-                <div class="stream-metadata-header">
-                    <span class="metadata-icon">📊</span>
-                    <span class="metadata-title">Stream Metadata</span>
-                </div>
-                <div class="stream-metadata-list">
-                    ${metadata.map(meta => `
-                        <div class="metadata-item-row">
-                            <span class="metadata-chunk-index">#${meta.index}</span>
-                            <span class="metadata-label">${meta.label}:</span>
-                            <span class="metadata-value">${meta.value}</span>
+/**
+ * 带行号 gutter 的纯文本渲染（不解析 markdown，避免工具输出里的 *、` 等被误识别）
+ */
+function renderPlainTextWithGutter(text) {
+    const lines = text.split('\n');
+    const rows = lines.map((line, i) => {
+        const content = escapeHtml(line) || '&nbsp;';
+        return `<div class="lf-md-row lf-md-row-plain"><span class="lf-md-gutter">${i + 1}</span><span class="lf-md-line">${content}</span></div>`;
+    });
+    return `<div class="lf-md">${rows.join('')}</div>`;
+}
+
+
+function renderStreamSection(detail) {
+    const chunks = getStreamChunks(detail);
+    if (!chunks.length) return emptyCard('No stream data');
+
+    const mode = sectionViewMode.stream || 'text';
+    const accumulated = accumulateText(chunks);
+
+    return `
+        <div class="lf-section-header">
+            <h3 class="lf-section-title">Stream <span class="lf-nav-item-count" style="margin-left: 0.375rem;">${chunks.length}</span></h3>
+            <div class="lf-tabs" data-tab-group="stream">
+                <button class="lf-tab ${mode === 'text' ? 'active' : ''}" data-tab="text">Accumulated</button>
+                <button class="lf-tab ${mode === 'json' ? 'active' : ''}" data-tab="json">Chunks (${chunks.length})</button>
+            </div>
+        </div>
+        <div data-tab-target="stream">
+            <div data-tab-view="text" data-tab-group="stream" style="${mode === 'text' ? '' : 'display:none;'}">
+                <div class="lf-stream-text">${accumulated ? escapeHtml(accumulated) : '<span style="color:var(--lf-text-faint);">No text content</span>'}</div>
+            </div>
+            <div data-tab-view="json" data-tab-group="stream" style="${mode === 'json' ? '' : 'display:none;'}">
+                <div class="lf-stream-chunks">
+                    ${chunks.map((chunk, idx) => `
+                        <div class="lf-stream-chunk">
+                            <span class="lf-stream-chunk-idx">#${idx + 1}</span>
+                            <div class="lf-stream-chunk-content">${renderJsonTree(chunk, { maxDepth: 2 })}</div>
                         </div>
                     `).join('')}
                 </div>
             </div>
-        `;
-    }
-
-    return html || '<div class="loading-state"><span>No text content found</span></div>';
+        </div>
+    `;
 }
 
-/**
- * 从 chunk 中提取文本内容
- */
-function extractTextFromChunk(chunk) {
-    if (typeof chunk === 'string') {
-        return chunk;
-    }
-
-    // OpenAI 格式
-    const delta = chunk.delta || chunk.choices?.[0]?.delta;
-    if (delta?.content) {
-        return delta.content;
-    }
-
-    // Anthropic 格式 - content_block_delta
-    if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'text_delta') {
-        return chunk.delta.text;
-    }
-
-    return null;
-}
-
-/**
- * 从 chunk 中提取元数据
- */
-function extractMetadataFromChunk(chunk) {
-    if (typeof chunk === 'string') {
-        return null;
-    }
-
-    // Stop reason
-    if (chunk.delta?.stop_reason || chunk.choices?.[0]?.finish_reason) {
-        return {
-            label: 'Stop Reason',
-            value: chunk.delta?.stop_reason || chunk.choices?.[0]?.finish_reason
-        };
-    }
-
-    // Usage
-    if (chunk.usage) {
-        const usage = chunk.usage;
-        return {
-            label: 'Token Usage',
-            value: `Input: ${usage.input_tokens || 0}, Output: ${usage.output_tokens || 0}, Total: ${(usage.input_tokens || 0) + (usage.output_tokens || 0)}`
-        };
-    }
-
-    // Message start
-    if (chunk.type === 'message_start') {
-        return {
-            label: 'Event',
-            value: 'Message Start'
-        };
-    }
-
-    // Message stop
-    if (chunk.type === 'message_stop') {
-        return {
-            label: 'Event',
-            value: 'Message Complete'
-        };
-    }
-
-    // Content block start
-    if (chunk.type === 'content_block_start') {
-        return {
-            label: 'Event',
-            value: `Content Block Start (${chunk.content_block?.type || 'unknown'})`
-        };
-    }
-
-    // Content block stop
-    if (chunk.type === 'content_block_stop') {
-        return {
-            label: 'Event',
-            value: 'Content Block Stop'
-        };
-    }
-
-    // Tool calls
-    const toolCalls = chunk.delta?.tool_calls || chunk.choices?.[0]?.delta?.tool_calls;
-    if (toolCalls) {
-        return {
-            label: 'Tool Call',
-            value: JSON.stringify(toolCalls)
-        };
-    }
-
-    return null;
-}
-
-/**
- * 切换流式视图
- */
-window.toggleStreamView = function(view) {
-    // 更新按钮状态
-    document.querySelectorAll('.stream-view-toggle .toggle-btn').forEach(btn => {
-        if (btn.dataset.view === view) {
-            btn.classList.add('active');
-        } else {
-            btn.classList.remove('active');
-        }
-    });
-
-    // 切换视图
-    document.querySelectorAll('.stream-view').forEach(viewEl => {
-        if (viewEl.dataset.view === view) {
-            viewEl.style.display = 'block';
-        } else {
-            viewEl.style.display = 'none';
-        }
-    });
-};
-
-/**
- * 渲染协议转换对比
- */
 function renderConversionSection(detail) {
+    const hasResponse = detail.native_response && detail.converted_response;
     return `
-        <div class="trace-section">
-            <h3 class="trace-section-title">
-                <span class="section-icon">🔄</span>
-                Protocol Conversion
-            </h3>
-
-            <h4 style="margin: 2rem 0 1rem; color: var(--monitor-text); font-size: 1.125rem;">Request Conversion</h4>
-            <div class="comparison-container">
-                <div class="comparison-panel">
-                    <div class="comparison-header">Original (${detail.from_provider})</div>
-                    <div class="comparison-content">
-                        ${renderJsonTree(detail.original_request)}
-                    </div>
-                </div>
-                <div class="comparison-panel">
-                    <div class="comparison-header">Processed (${detail.to_provider})</div>
-                    <div class="comparison-content">
-                        ${renderJsonTree(detail.processed_request)}
-                    </div>
-                </div>
+        <div class="lf-section-header">
+            <h3 class="lf-section-title">Protocol Conversion</h3>
+        </div>
+        <div class="lf-compare">
+            <h4>Request</h4>
+            <div class="lf-card">
+                <div class="lf-card-header">Original <span class="lf-card-header-right">${escapeHtml(detail.from_provider || '')}</span></div>
+                <div class="lf-card-body nopad">${renderJsonTree(detail.original_request || {})}</div>
             </div>
-
-            ${detail.native_response && detail.converted_response ? `
-                <h4 style="margin: 2rem 0 1rem; color: var(--monitor-text); font-size: 1.125rem;">Response Conversion</h4>
-                <div class="comparison-container">
-                    <div class="comparison-panel">
-                        <div class="comparison-header">Native Response</div>
-                        <div class="comparison-content">
-                            ${renderJsonTree(detail.native_response)}
-                        </div>
-                    </div>
-                    <div class="comparison-panel">
-                        <div class="comparison-header">Converted Response</div>
-                        <div class="comparison-content">
-                            ${renderJsonTree(detail.converted_response)}
-                        </div>
-                    </div>
+            <div class="lf-card">
+                <div class="lf-card-header">Processed <span class="lf-card-header-right">${escapeHtml(detail.to_provider || '')}</span></div>
+                <div class="lf-card-body nopad">${renderJsonTree(detail.processed_request || {})}</div>
+            </div>
+            ${hasResponse ? `
+                <h4>Response</h4>
+                <div class="lf-card">
+                    <div class="lf-card-header">Native</div>
+                    <div class="lf-card-body nopad">${renderJsonTree(detail.native_response)}</div>
+                </div>
+                <div class="lf-card">
+                    <div class="lf-card-header">Converted</div>
+                    <div class="lf-card-body nopad">${renderJsonTree(detail.converted_response)}</div>
                 </div>
             ` : ''}
         </div>
     `;
 }
 
-/**
- * 关闭详情模态框
- */
-function closeDetailModal() {
-    const modal = document.getElementById('aiMonitorDetailModal');
-    if (modal) {
-        modal.style.display = 'none';
-        currentSection = 'messages';
-    }
+function renderMetadataSection(detail) {
+    const sessionActive = currentFilters.session_id === detail.session_id;
+    const sessionCell = detail.session_id ? `
+        <span class="lf-pill-mono" title="${escapeAttr(detail.session_id)}">${escapeHtml(detail.session_id)}</span>
+        <button class="lf-btn lf-btn-sm ${sessionActive ? 'lf-btn-accent' : ''}" data-filter-session="${escapeAttr(detail.session_id)}" style="margin-left: 0.5rem;">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+                <path d="M2 3h12l-5 6v4l-2 1V9L2 3z" fill="currentColor"/>
+            </svg>
+            ${sessionActive ? 'Filtered' : 'Filter this session'}
+        </button>
+    ` : null;
+
+    const rows = [
+        ['Request ID', detail.request_id, 'mono'],
+        ['Session ID', sessionCell, 'raw'],
+        ['Timestamp', formatTimestampFull(detail.timestamp), 'plain'],
+        ['From Provider', detail.from_provider, 'mono'],
+        ['To Provider', detail.to_provider, 'mono'],
+        ['Model', detail.model, 'mono'],
+        ['Stream', detail.is_stream ? 'yes' : 'no', 'mono'],
+        ['Status', detail.status, 'plain'],
+        ['Duration', detail.duration_ms != null ? `${detail.duration_ms} ms` : null, 'mono'],
+        ['Prompt Tokens', detail.prompt_tokens, 'mono'],
+        ['Completion Tokens', detail.completion_tokens, 'mono'],
+        ['Total Tokens', detail.total_tokens, 'mono']
+    ].filter(([, v]) => v != null && v !== '');
+
+    return `
+        <div class="lf-section-header">
+            <h3 class="lf-section-title">Metadata</h3>
+        </div>
+        <div class="lf-card">
+            <table class="lf-kv">
+                <tbody>
+                    ${rows.map(([k, v, cls]) => `
+                        <tr>
+                            <th>${escapeHtml(k)}</th>
+                            <td class="${cls === 'plain' ? 'lf-kv-value-plain' : ''}">${cls === 'raw' ? v : escapeHtml(String(v))}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+        ${detail.error_message ? `
+            <div class="lf-card" style="margin-top: 0.75rem; border-color: rgba(239, 68, 68, 0.4);">
+                <div class="lf-card-header" style="color: var(--danger-color);">Error</div>
+                <div class="lf-card-body"><pre style="white-space: pre-wrap; margin: 0; color: var(--danger-color); font-family: var(--lf-mono); font-size: 0.75rem;">${escapeHtml(detail.error_message)}</pre></div>
+            </div>
+        ` : ''}
+    `;
 }
 
-/**
- * 处理过滤器变化
- */
+/* ───── helpers ───── */
+
+function renderDataCard(title, data, groupKey) {
+    const mode = sectionViewMode[groupKey] || 'formatted';
+    return `
+        <div class="lf-section-header">
+            <h3 class="lf-section-title">${escapeHtml(title)}</h3>
+            <div class="lf-tabs" data-tab-group="${groupKey}">
+                <button class="lf-tab ${mode === 'formatted' ? 'active' : ''}" data-tab="formatted">Formatted</button>
+                <button class="lf-tab ${mode === 'json' ? 'active' : ''}" data-tab="json">JSON</button>
+            </div>
+        </div>
+        <div data-tab-target="${groupKey}">
+            <div data-tab-view="formatted" data-tab-group="${groupKey}" style="${mode === 'formatted' ? '' : 'display:none;'}">
+                ${renderFormatted(data)}
+            </div>
+            <div data-tab-view="json" data-tab-group="${groupKey}" style="${mode === 'json' ? '' : 'display:none;'}">
+                ${renderJsonTree(data)}
+            </div>
+        </div>
+    `;
+}
+
+function renderFormatted(data) {
+    if (!data || typeof data !== 'object') {
+        return `<div class="lf-card"><div class="lf-card-body"><pre style="margin:0;white-space:pre-wrap;">${escapeHtml(String(data))}</pre></div></div>`;
+    }
+
+    const messages = Array.isArray(data.messages) ? data.messages : null;
+    if (messages) {
+        return `
+            <div class="lf-messages">
+                ${messages.map((m, i) => renderMessage(m, i)).join('')}
+            </div>
+            ${renderAuxFields(data)}
+        `;
+    }
+
+    // Response-like object
+    const choice = data.choices?.[0]?.message;
+    if (choice) {
+        return `
+            <div class="lf-messages">${renderMessage(choice)}</div>
+            ${renderJsonTree(data)}
+        `;
+    }
+    // Anthropic response
+    if (Array.isArray(data.content) && data.role) {
+        return `
+            <div class="lf-messages">${renderMessage(data)}</div>
+            ${renderJsonTree(data)}
+        `;
+    }
+
+    return renderJsonTree(data);
+}
+
+function renderAuxFields(data) {
+    const aux = { ...data };
+    delete aux.messages;
+    if (Object.keys(aux).length === 0) return '';
+    return `
+        <div class="lf-card" style="margin-top: 0.75rem;">
+            <div class="lf-card-header">Parameters</div>
+            <div class="lf-card-body nopad">${renderJsonTree(aux)}</div>
+        </div>
+    `;
+}
+
+function emptyCard(msg) {
+    return `<div class="lf-card"><div class="lf-card-body"><div class="lf-empty" style="padding:1.5rem;"><span>${escapeHtml(msg)}</span></div></div></div>`;
+}
+
+function getMessages(detail) {
+    return detail.processed_request?.messages || detail.original_request?.messages || [];
+}
+
+function getStreamChunks(detail) {
+    return detail.stream_chunks?.converted || detail.stream_chunks?.native || [];
+}
+
+function accumulateText(chunks) {
+    let txt = '';
+    for (const chunk of chunks) {
+        const t = extractTextFromChunk(chunk);
+        if (t) txt += t;
+    }
+    return txt;
+}
+
+function extractTextFromChunk(chunk) {
+    if (typeof chunk === 'string') return chunk;
+    const delta = chunk.delta || chunk.choices?.[0]?.delta;
+    if (delta?.content) return delta.content;
+    if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'text_delta') return chunk.delta.text;
+    return null;
+}
+
+function reconstructAssistantMessage(chunks) {
+    let text = '';
+    const toolCalls = [];
+    for (const chunk of chunks) {
+        if (chunk.choices?.[0]) {
+            const d = chunk.choices[0].delta;
+            if (d?.content) text += d.content;
+            if (d?.tool_calls) {
+                for (const tc of d.tool_calls) {
+                    const i = tc.index || 0;
+                    if (!toolCalls[i]) toolCalls[i] = { id: tc.id || '', type: 'function', function: { name: tc.function?.name || '', arguments: '' } };
+                    if (tc.function?.name) toolCalls[i].function.name = tc.function.name;
+                    if (tc.function?.arguments) toolCalls[i].function.arguments += tc.function.arguments;
+                }
+            }
+        }
+        if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'text_delta') text += chunk.delta.text;
+        if (chunk.type === 'content_block_start' && chunk.content_block?.type === 'tool_use') {
+            toolCalls.push({ id: chunk.content_block.id, type: 'tool_use', name: chunk.content_block.name, input: {}, inputJson: '' });
+        }
+        if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'input_json_delta') {
+            const last = toolCalls[toolCalls.length - 1];
+            if (last) last.inputJson = (last.inputJson || '') + chunk.delta.partial_json;
+        }
+    }
+    if (!text && !toolCalls.length) return null;
+
+    const msg = { role: 'assistant', content: [] };
+    if (text) msg.content.push({ type: 'text', text });
+
+    for (const tc of toolCalls) {
+        if (tc.type === 'tool_use') {
+            try { tc.input = tc.inputJson ? JSON.parse(tc.inputJson) : {}; } catch { tc.input = {}; }
+            delete tc.inputJson;
+            msg.content.push(tc);
+        }
+    }
+    const fnCalls = toolCalls.filter(tc => tc.type === 'function');
+    if (fnCalls.length) msg.tool_calls = fnCalls;
+
+    if (msg.content.length === 0) msg.content = '';
+    else if (msg.content.length === 1 && msg.content[0].type === 'text') msg.content = msg.content[0].text;
+
+    return msg;
+}
+
+/* ───── controls ───── */
+
+function closeDetailModal() {
+    const modal = document.getElementById('aiMonitorDetailModal');
+    if (modal) modal.style.display = 'none';
+    currentDetail = null;
+}
+
+function copyRequestId() {
+    const id = document.getElementById('modalRequestId')?.textContent;
+    if (!id || id === '—') return;
+    navigator.clipboard.writeText(id);
+    const btn = document.getElementById('copyRequestIdBtn');
+    if (!btn) return;
+    const original = btn.innerHTML;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M13 4L6 11 3 8" stroke="currentColor" stroke-width="2" fill="none"/></svg>`;
+    setTimeout(() => { btn.innerHTML = original; }, 1200);
+}
+
 function handleFilterChange() {
     currentFilters.status = document.getElementById('statusFilter')?.value || '';
     currentFilters.provider = document.getElementById('providerFilter')?.value || '';
     currentPage = 0;
+    writeFiltersToUrl();
     loadRequests();
 }
 
-/**
- * 翻页
- */
+function applySessionFilter(sessionId) {
+    currentFilters.session_id = sessionId || '';
+    currentPage = 0;
+    writeFiltersToUrl();
+    closeDetailModal();
+    loadRequests();
+}
+
+function clearSessionFilter() {
+    currentFilters.session_id = '';
+    currentPage = 0;
+    writeFiltersToUrl();
+    loadRequests();
+}
+
+function renderActiveFilters() {
+    const host = document.getElementById('activeFilters');
+    if (!host) return;
+    const pieces = [];
+    if (currentFilters.session_id) {
+        pieces.push(`
+            <span class="lf-active-filter-chip">
+                <span class="lf-active-filter-label">Session</span>
+                <span class="lf-active-filter-value lf-pill-mono" title="${escapeAttr(currentFilters.session_id)}">${escapeHtml(currentFilters.session_id)}</span>
+                <button class="lf-active-filter-close" data-clear="session_id" title="Clear filter">
+                    <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
+                        <path d="M12 4L4 12M4 4l8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+            </span>
+        `);
+    }
+    if (!pieces.length) {
+        host.innerHTML = '';
+        host.style.display = 'none';
+        return;
+    }
+    host.style.display = '';
+    host.innerHTML = pieces.join('');
+    host.querySelectorAll('[data-clear]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const key = btn.dataset.clear;
+            if (key === 'session_id') clearSessionFilter();
+        });
+    });
+}
+
 function changePage(delta) {
     currentPage = Math.max(0, currentPage + delta);
     loadRequests();
 }
 
-/**
- * 更新分页信息
- */
 function updatePagination(pagination) {
-    const prevBtn = document.getElementById('prevPageBtn');
-    const nextBtn = document.getElementById('nextPageBtn');
-    const pageInfo = document.getElementById('pageInfo');
-
-    if (prevBtn) prevBtn.disabled = currentPage === 0;
-    if (nextBtn) nextBtn.disabled = pagination.count < pageSize;
-    if (pageInfo) pageInfo.textContent = `Page ${currentPage + 1}`;
+    const prev = document.getElementById('prevPageBtn');
+    const next = document.getElementById('nextPageBtn');
+    const info = document.getElementById('pageInfo');
+    if (prev) prev.disabled = currentPage === 0;
+    if (next) next.disabled = pagination.count < pageSize;
+    if (info) info.textContent = `Page ${currentPage + 1}`;
 }
 
-/**
- * 更新统计信息
- */
 function updateStats(count) {
-    const badge = document.getElementById('totalRequests');
-    if (badge) {
-        badge.textContent = `${count} request${count !== 1 ? 's' : ''}`;
-    }
+    const el = document.getElementById('totalRequests');
+    if (el) el.textContent = `${count} trace${count !== 1 ? 's' : ''}`;
 }
 
-/**
- * 处理清理旧记录
- */
 async function handleCleanup() {
     const days = prompt('Keep records from the last N days:', '7');
     if (!days) return;
-
     try {
         const response = await fetch('/api/ai-monitor/cleanup', {
             method: 'POST',
@@ -1028,153 +1056,132 @@ async function handleCleanup() {
             },
             body: JSON.stringify({ daysToKeep: parseInt(days) })
         });
-
         if (!response.ok) throw new Error('Cleanup failed');
-
         const result = await response.json();
-        alert(`✅ Cleaned up ${result.data.deletedCount} records`);
+        alert(`Cleaned up ${result.data.deletedCount} records`);
         loadRequests();
     } catch (error) {
-        console.error('Cleanup failed:', error);
-        alert('❌ Cleanup failed: ' + error.message);
+        alert('Cleanup failed: ' + error.message);
     }
 }
 
-/**
- * 工具函数
- */
+/* ───── utils ───── */
+
 function formatTimestamp(ts) {
     const date = new Date(ts);
     const now = new Date();
     const diff = now - date;
+    if (diff < 60000) return 'just now';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
 
-    // 小于 1 分钟
-    if (diff < 60000) {
-        return 'Just now';
-    }
-    // 小于 1 小时
-    if (diff < 3600000) {
-        const mins = Math.floor(diff / 60000);
-        return `${mins} min${mins > 1 ? 's' : ''} ago`;
-    }
-    // 小于 24 小时
-    if (diff < 86400000) {
-        const hours = Math.floor(diff / 3600000);
-        return `${hours} hour${hours > 1 ? 's' : ''} ago`;
-    }
-
-    // 否则显示完整时间
-    return date.toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
+function formatTimestampFull(ts) {
+    return new Date(ts).toLocaleString(undefined, {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit'
     });
+}
+
+function formatDuration(ms) {
+    if (ms < 1000) return `${ms}ms`;
+    const s = ms / 1000;
+    if (s < 60) return `${s.toFixed(2)}s`;
+    const m = Math.floor(s / 60);
+    const rem = Math.round(s - m * 60);
+    return `${m}m ${rem}s`;
+}
+
+function formatNum(n) {
+    if (n == null) return '—';
+    return Number(n).toLocaleString();
 }
 
 function escapeHtml(text) {
     const div = document.createElement('div');
-    div.textContent = text;
+    div.textContent = text == null ? '' : String(text);
     return div.innerHTML;
 }
 
-/**
- * 渲染 Markdown
- */
-function renderMarkdown(text) {
-    // 简单的 Markdown 渲染（支持常用语法）
-    let html = escapeHtml(text);
-
-    // 代码块
-    html = html.replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => {
-        return `<pre class="markdown-code-block"><code class="language-${lang || 'text'}">${code.trim()}</code></pre>`;
-    });
-
-    // 行内代码
-    html = html.replace(/`([^`]+)`/g, '<code class="markdown-inline-code">$1</code>');
-
-    // 标题
-    html = html.replace(/^### (.+)$/gm, '<h3 class="markdown-h3">$1</h3>');
-    html = html.replace(/^## (.+)$/gm, '<h2 class="markdown-h2">$1</h2>');
-    html = html.replace(/^# (.+)$/gm, '<h1 class="markdown-h1">$1</h1>');
-
-    // 粗体
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
-
-    // 斜体
-    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-    html = html.replace(/_(.+?)_/g, '<em>$1</em>');
-
-    // 链接
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-
-    // 无序列表
-    html = html.replace(/^\* (.+)$/gm, '<li>$1</li>');
-    html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
-    html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul class="markdown-list">$&</ul>');
-
-    // 有序列表
-    html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-
-    // 换行
-    html = html.replace(/\n\n/g, '</p><p class="markdown-p">');
-    html = html.replace(/\n/g, '<br>');
-
-    return `<div class="markdown-content"><p class="markdown-p">${html}</p></div>`;
+function escapeAttr(text) {
+    return escapeHtml(text).replace(/"/g, '&quot;');
 }
 
 /**
- * 切换消息视图
+ * 按行渲染 markdown，带行号 gutter，保留代码块结构
  */
-window.toggleMessageView = function(messageId, view) {
-    // 更新按钮状态
-    document.querySelectorAll(`[data-message-id="${messageId}"].view-toggle-btn`).forEach(btn => {
-        if (btn.dataset.view === view) {
-            btn.classList.add('active');
+function renderMarkdownWithGutter(text) {
+    const lines = text.split('\n');
+    let inCode = false;
+    const rows = lines.map((line, i) => {
+        const lineNum = i + 1;
+        let content;
+        let rowCls = 'lf-md-row';
+
+        const fenceMatch = line.match(/^\s*```(\w*)\s*$/);
+        if (fenceMatch) {
+            inCode = !inCode;
+            rowCls += ' lf-md-row-fence';
+            content = `<span class="lf-md-fence-txt">${escapeHtml(line)}</span>`;
+        } else if (inCode) {
+            rowCls += ' lf-md-row-code';
+            content = `<code>${escapeHtml(line) || '&nbsp;'}</code>`;
         } else {
-            btn.classList.remove('active');
+            rowCls += ' lf-md-row-text';
+            content = renderInlineMarkdown(line) || '&nbsp;';
         }
+
+        return `<div class="${rowCls}"><span class="lf-md-gutter">${lineNum}</span><span class="lf-md-line">${content}</span></div>`;
     });
 
-    // 切换视图
-    document.querySelectorAll(`[data-message-id="${messageId}"].message-view`).forEach(viewEl => {
-        if (viewEl.dataset.view === view) {
-            viewEl.classList.remove('hidden');
+    return `<div class="lf-md">${rows.join('')}</div>`;
+}
+
+function renderInlineMarkdown(line) {
+    if (!line) return '';
+
+    const leadingMatch = line.match(/^(\s+)/);
+    const leading = leadingMatch ? leadingMatch[0] : '';
+    const rest = line.slice(leading.length);
+    let html = escapeHtml(rest);
+
+    const hMatch = html.match(/^(#{1,6})\s+(.+)$/);
+    if (hMatch) {
+        const level = hMatch[1].length;
+        html = `<span class="lf-md-h lf-md-h${level}">${applyInline(hMatch[2])}</span>`;
+    } else {
+        const bulletMatch = html.match(/^([-*+])\s+(.+)$/);
+        const orderMatch = html.match(/^(\d+)\.\s+(.+)$/);
+        if (bulletMatch) {
+            html = `<span class="lf-md-bullet">•</span> ${applyInline(bulletMatch[2])}`;
+        } else if (orderMatch) {
+            html = `<span class="lf-md-bullet">${orderMatch[1]}.</span> ${applyInline(orderMatch[2])}`;
         } else {
-            viewEl.classList.add('hidden');
+            html = applyInline(html);
         }
-    });
-};
-
-/**
- * 滚动消息到顶部
- */
-window.scrollMessagesToTop = function() {
-    const messagesContainer = document.getElementById('messagesContainer');
-    if (messagesContainer) {
-        messagesContainer.scrollTo({ top: 0, behavior: 'smooth' });
     }
-};
 
-/**
- * 滚动消息到底部
- */
-window.scrollMessagesToBottom = function() {
-    const messagesContainer = document.getElementById('messagesContainer');
-    if (messagesContainer) {
-        messagesContainer.scrollTo({ top: messagesContainer.scrollHeight, behavior: 'smooth' });
-    }
-};
+    const leadingSpaces = leading.replace(/\t/g, '    ').replace(/ /g, '&nbsp;');
+    return `${leadingSpaces}${html}`;
+}
 
-function debounce(func, wait) {
-    let timeout;
-    return function executedFunction(...args) {
-        const later = () => {
-            clearTimeout(timeout);
-            func(...args);
-        };
-        clearTimeout(timeout);
-        timeout = setTimeout(later, wait);
+function applyInline(html) {
+    // inline code first（避免内部语法被误解析）
+    html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    // bold (**xx**)
+    html = html.replace(/\*\*([^\n*]+?)\*\*/g, '<strong>$1</strong>');
+    // italic (*xx*) — 不跨行、不冲突
+    html = html.replace(/(^|[\s(])\*([^*\n]+?)\*(?=[\s.,)!?:]|$)/g, '$1<em>$2</em>');
+    // links
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return html;
+}
+
+function debounce(fn, wait) {
+    let t;
+    return (...args) => {
+        clearTimeout(t);
+        t = setTimeout(() => fn(...args), wait);
     };
 }

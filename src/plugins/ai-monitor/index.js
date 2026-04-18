@@ -1,5 +1,5 @@
 import logger from '../../utils/logger.js';
-import aiMonitorDB from '../../utils/ai-monitor-db.js';
+import aiMonitorDB, { extractSessionIdFromRequest } from '../../utils/ai-monitor-db.js';
 
 /**
  * AI 接口监控插件
@@ -91,6 +91,8 @@ const aiMonitorPlugin = {
                         }
                     }
 
+                    const sessionId = extractSessionIdFromRequest(originalRequestBody);
+
                     aiMonitorDB.upsertRequest({
                         request_id: traceRequestId,
                         timestamp: Date.now(),
@@ -99,7 +101,8 @@ const aiMonitorPlugin = {
                         model: model,
                         is_stream: isStream,
                         status: 'processing',
-                        user_query_preview: userQueryPreview
+                        user_query_preview: userQueryPreview,
+                        session_id: sessionId
                     });
 
                     aiMonitorDB.upsertRequestDetails(traceRequestId, {

@@ -4,6 +4,29 @@ import fs from 'fs';
 import logger from './logger.js';
 
 /**
+ * 从 metadata.user_id 中提取 session_id。
+ * 兼容两种常见格式：
+ *   1) Claude Code: JSON 字符串 {"device_id":"...","session_id":"<uuid>"}
+ *   2) LangSmith: user_<hash>_account__session_<uuid>
+ */
+export function extractSessionId(userId) {
+    if (!userId || typeof userId !== 'string') return null;
+    const trimmed = userId.trim();
+    if (trimmed.startsWith('{')) {
+        try {
+            const obj = JSON.parse(trimmed);
+            if (obj?.session_id) return String(obj.session_id);
+        } catch { /* fallthrough */ }
+    }
+    const m = trimmed.match(/_session_([a-zA-Z0-9-]+)/);
+    return m ? m[1] : null;
+}
+
+export function extractSessionIdFromRequest(request) {
+    return extractSessionId(request?.metadata?.user_id);
+}
+
+/**
  * AI Monitor 数据库管理
  * 存储 AI 请求响应的完整数据用于调试和分析
  */
@@ -31,6 +54,7 @@ class AIMonitorDB {
             this.db.pragma('journal_mode = WAL');
 
             this.createTables();
+            this.runMigrations();
             logger.info('[AI Monitor DB] Database initialized:', this.dbPath);
         } catch (error) {
             logger.error('[AI Monitor DB] Failed to initialize database:', error.message);
@@ -59,12 +83,14 @@ class AIMonitorDB {
                 completion_tokens INTEGER,
                 total_tokens INTEGER,
                 user_query_preview TEXT,
+                session_id TEXT,
                 created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
             );
 
             CREATE INDEX IF NOT EXISTS idx_request_id ON ai_requests(request_id);
             CREATE INDEX IF NOT EXISTS idx_timestamp ON ai_requests(timestamp);
             CREATE INDEX IF NOT EXISTS idx_status ON ai_requests(status);
+            CREATE INDEX IF NOT EXISTS idx_session_id ON ai_requests(session_id);
         `);
 
         // 详情表：存储完整的请求响应 JSON
@@ -84,21 +110,68 @@ class AIMonitorDB {
         `);
     }
 
+    hasColumn(table, column) {
+        const info = this.db.prepare(`PRAGMA table_info(${table})`).all();
+        return info.some(col => col.name === column);
+    }
+
+    /**
+     * 运行 schema 迁移（幂等）
+     */
+    runMigrations() {
+        // 向老库补齐 session_id 列
+        if (!this.hasColumn('ai_requests', 'session_id')) {
+            logger.info('[AI Monitor DB] Migrating: adding session_id column');
+            this.db.exec('ALTER TABLE ai_requests ADD COLUMN session_id TEXT');
+            this.db.exec('CREATE INDEX IF NOT EXISTS idx_session_id ON ai_requests(session_id)');
+        }
+
+        // 回填 session_id —— 仅处理值为空的行
+        const needsBackfill = this.db.prepare('SELECT COUNT(*) as c FROM ai_requests WHERE session_id IS NULL').get();
+        if (needsBackfill.c > 0) {
+            logger.info(`[AI Monitor DB] Migrating: backfilling session_id for ${needsBackfill.c} rows`);
+            const rows = this.db.prepare(`
+                SELECT r.request_id, d.original_request
+                FROM ai_requests r
+                LEFT JOIN ai_request_details d ON r.request_id = d.request_id
+                WHERE r.session_id IS NULL AND d.original_request IS NOT NULL
+            `).all();
+
+            const update = this.db.prepare('UPDATE ai_requests SET session_id = ? WHERE request_id = ?');
+            let updated = 0;
+            const tx = this.db.transaction((items) => {
+                for (const row of items) {
+                    try {
+                        const req = JSON.parse(row.original_request);
+                        const sid = extractSessionIdFromRequest(req);
+                        if (sid) {
+                            update.run(sid, row.request_id);
+                            updated++;
+                        }
+                    } catch { /* skip malformed */ }
+                }
+            });
+            tx(rows);
+            logger.info(`[AI Monitor DB] Backfilled session_id for ${updated} / ${rows.length} rows`);
+        }
+    }
+
     /**
      * 插入或更新请求记录
      */
     upsertRequest(data) {
         const stmt = this.db.prepare(`
             INSERT INTO ai_requests (
-                request_id, timestamp, from_provider, to_provider, model, is_stream, status, user_query_preview
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                request_id, timestamp, from_provider, to_provider, model, is_stream, status, user_query_preview, session_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(request_id) DO UPDATE SET
                 from_provider = excluded.from_provider,
                 to_provider = excluded.to_provider,
                 model = excluded.model,
                 is_stream = excluded.is_stream,
                 status = excluded.status,
-                user_query_preview = excluded.user_query_preview
+                user_query_preview = excluded.user_query_preview,
+                session_id = COALESCE(excluded.session_id, session_id)
         `);
 
         stmt.run(
@@ -109,7 +182,8 @@ class AIMonitorDB {
             data.model,
             data.is_stream ? 1 : 0,
             data.status || 'pending',
-            data.user_query_preview || null
+            data.user_query_preview || null,
+            data.session_id || null
         );
     }
 
@@ -166,7 +240,7 @@ class AIMonitorDB {
      * 查询请求列表
      */
     getRequests(options = {}) {
-        const { limit = 100, offset = 0, status = null, provider = null } = options;
+        const { limit = 100, offset = 0, status = null, provider = null, session_id = null } = options;
 
         let sql = 'SELECT * FROM ai_requests WHERE 1=1';
         const params = [];
@@ -179,6 +253,11 @@ class AIMonitorDB {
         if (provider) {
             sql += ' AND (from_provider = ? OR to_provider = ?)';
             params.push(provider, provider);
+        }
+
+        if (session_id) {
+            sql += ' AND session_id = ?';
+            params.push(session_id);
         }
 
         sql += ' ORDER BY timestamp DESC LIMIT ? OFFSET ?';

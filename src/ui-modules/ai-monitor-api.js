@@ -11,8 +11,9 @@ export async function handleGetAIRequests(req, res) {
         const offset = parseInt(url.searchParams.get('offset')) || 0;
         const status = url.searchParams.get('status') || null;
         const provider = url.searchParams.get('provider') || null;
+        const session_id = url.searchParams.get('session_id') || null;
 
-        const requests = aiMonitorDB.getRequests({ limit, offset, status, provider });
+        const requests = aiMonitorDB.getRequests({ limit, offset, status, provider, session_id });
 
         res.writeHead(200, {
             'Content-Type': 'application/json',
