@@ -28,6 +28,8 @@ PROXY_API_URL="${PROXY_API_URL:-http://127.0.0.1:9090}"
 PROXY_API_TOKEN="${PROXY_API_TOKEN:-iYTW2vgxjvEiWgF9}"
 PROXY_GROUP="${PROXY_GROUP:-ApiFixedProxy}"
 USE_PROXY="${USE_PROXY:-false}"
+# 是否在成功后注释掉账号行
+COMMENT_ON_SUCCESS="${COMMENT_ON_SUCCESS:-true}"
 
 # 日志函数
 log_info() {
@@ -150,6 +152,7 @@ ${YELLOW}选项：${NC}
   -u, --api-url URL          AIClient2API 地址（默认: http://localhost:3300）
   -b, --batch FILE           批量处理模式，从文件读取账号信息
   --use-proxy                启用代理（每个账号自动切换节点）
+  --no-comment               成功后不注释账号行（默认会注释）
   -h, --help                 显示此帮助信息
 
 ${YELLOW}代理配置（环境变量）：${NC}
@@ -158,6 +161,7 @@ ${YELLOW}代理配置（环境变量）：${NC}
   PROXY_API_URL              代理 API 地址（默认: http://127.0.0.1:9090）
   PROXY_API_TOKEN            代理 API Token（默认: iYTW2vgxjvEiWgF9）
   PROXY_GROUP                代理组名称（默认: FixedProxy）
+  COMMENT_ON_SUCCESS         成功后是否注释账号行（默认: true）
 
 ${YELLOW}批量文件格式：${NC}
 
@@ -566,6 +570,10 @@ parse_args() {
                 ;;
             --use-proxy)
                 USE_PROXY=true
+                shift
+                ;;
+            --no-comment)
+                COMMENT_ON_SUCCESS=false
                 shift
                 ;;
             -h|--help)
@@ -1378,10 +1386,12 @@ batch_process() {
 
             if process_single_account "$email" "$password" "$totp" "$((i+1))"; then
                 ((success_count++))
-                # 成功后在文件中注释掉包含该邮箱的行
-                sed -i.bak "/^[^#].*${email}/s/^/# /" "$BATCH_FILE"
-                rm -f "${BATCH_FILE}.bak"
-                log_info "  [标记] 已在文件中注释掉账号: $email"
+                # 成功后在文件中注释掉包含该邮箱的行（如果启用）
+                if [ "$COMMENT_ON_SUCCESS" = "true" ]; then
+                    sed -i.bak "/^[^#].*${email}/s/^/# /" "$BATCH_FILE"
+                    rm -f "${BATCH_FILE}.bak"
+                    log_info "  [标记] 已在文件中注释掉账号: $email"
+                fi
             else
                 ((fail_count++))
                 failed_emails+=("$email")
