@@ -1,19 +1,23 @@
 services:
   aiclient-api:
-    # 方式一：使用 Docker Hub 预构建镜像（默认，推荐）
+    # 使用阿里云镜像仓库
     # 使用方法: docker compose up -d
-    image: justlikemaki/aiclient-2-api:latest
+    # 更新镜像: docker compose pull && docker compose up -d
+    image: courtify-registry.cn-shenzhen.cr.aliyuncs.com/courtify/aiclient2api:202604170426
     container_name: aiclient2api
-    restart: unless-stopped
+    restart: always
     ports:
-      - "3000:3000"
-      - "8085-8087:8085-8087"
+      - "3300:3000"
+      - "8085-8086:8085-8086"
       - "1455:1455"
       - "19876-19880:19876-19880"
     volumes:
-      - ./configs:/app/configs
+      - ../configs:/app/configs
+      - ../data:/app/data
+      - ../logs:/app/logs
     environment:
-      - ARGS=
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
     healthcheck:
       test: ["CMD", "node", "healthcheck.js"]
       interval: 30s
