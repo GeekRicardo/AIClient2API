@@ -31,6 +31,21 @@ USE_PROXY="${USE_PROXY:-false}"
 # 是否在成功后注释掉账号行
 COMMENT_ON_SUCCESS="${COMMENT_ON_SUCCESS:-true}"
 
+# CloakBrowser Manager 配置
+CLOAK_MANAGER_URL="${CLOAK_MANAGER_URL:-http://localhost:8080}"
+CLOAK_AUTH_TOKEN="${CLOAK_AUTH_TOKEN:-}"
+# 任务结束后是否保留 profile（默认删除，保持环境干净）
+CLOAK_KEEP_PROFILE="${CLOAK_KEEP_PROFILE:-false}"
+# Manager 内 Chrome 运行的平台标记
+CLOAK_PLATFORM="${CLOAK_PLATFORM:-linux}"
+# Manager 容器视角的代理地址。未设置时从 PROXY_URL 自动转换：
+# 把 localhost / 127.0.0.1 重写为 host.docker.internal，让 Manager 容器
+# 通过 docker 网络访问宿主机上 mihomo 暴露的端口。
+CLOAK_PROXY_URL="${CLOAK_PROXY_URL:-}"
+
+# 当前正在使用的 Manager profile id（供异常退出时清理）
+CURRENT_PROFILE_ID=""
+
 # 日志函数
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1"
@@ -58,6 +73,126 @@ log_batch() {
 
 log_proxy() {
     echo -e "${CYAN}[PROXY]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
+
+log_cloak() {
+    echo -e "${CYAN}[CLOAK]${NC} $(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
+
+# === CloakBrowser Manager 调用 ===
+
+# Manager 容器视角的代理 URL：
+#   - 显式设置 CLOAK_PROXY_URL 时直接使用
+#   - 否则把 PROXY_URL 中的 localhost / 127.0.0.1 重写为 host.docker.internal
+_cloak_resolve_proxy() {
+    if [ -n "$CLOAK_PROXY_URL" ]; then
+        printf '%s' "$CLOAK_PROXY_URL"
+        return
+    fi
+    printf '%s' "$PROXY_URL" | sed -E 's#(://)(127\.0\.0\.1|localhost)([:/]|$)#\1host.docker.internal\3#'
+}
+
+# 通过 node 提取 JSON 字段，避免依赖 jq
+_cloak_json_field() {
+    local field="$1"
+    node -e '
+        let s = "";
+        process.stdin.on("data", c => s += c);
+        process.stdin.on("end", () => {
+            try {
+                const v = JSON.parse(s)[process.argv[1]];
+                if (v !== undefined && v !== null) console.log(v);
+            } catch (e) {}
+        });
+    ' "$field"
+}
+
+_cloak_curl() {
+    if [ -n "$CLOAK_AUTH_TOKEN" ]; then
+        curl -s -H "Authorization: Bearer $CLOAK_AUTH_TOKEN" "$@"
+    else
+        curl -s "$@"
+    fi
+}
+
+cloak_create_profile() {
+    local name="$1"
+    local proxy="$2"
+
+    local body
+    body=$(node -e '
+        const [name, platform, proxy] = process.argv.slice(1);
+        const obj = { name, platform };
+        if (proxy) obj.proxy = proxy;
+        console.log(JSON.stringify(obj));
+    ' "$name" "$CLOAK_PLATFORM" "$proxy")
+
+    local resp
+    resp=$(_cloak_curl -X POST "$CLOAK_MANAGER_URL/api/profiles" \
+        -H 'Content-Type: application/json' -d "$body")
+
+    local id
+    id=$(printf '%s' "$resp" | _cloak_json_field id)
+
+    if [ -z "$id" ]; then
+        log_error "  [Cloak] 创建 profile 失败: $resp" >&2
+        return 1
+    fi
+
+    printf '%s' "$id"
+}
+
+cloak_launch_profile() {
+    local id="$1"
+
+    local resp
+    resp=$(_cloak_curl -X POST "$CLOAK_MANAGER_URL/api/profiles/$id/launch" \
+        -H 'Content-Type: application/json' -d '{}')
+
+    local cdp
+    cdp=$(printf '%s' "$resp" | _cloak_json_field cdp_url)
+
+    if [ -z "$cdp" ]; then
+        log_error "  [Cloak] 启动 profile 失败: $resp" >&2
+        return 1
+    fi
+
+    # cdp_url 一般是 /api/profiles/<id>/cdp，需要拼成完整 URL
+    if [[ "$cdp" == /* ]]; then
+        printf '%s%s' "$CLOAK_MANAGER_URL" "$cdp"
+    else
+        printf '%s' "$cdp"
+    fi
+}
+
+cloak_stop_profile() {
+    local id="$1"
+    [ -z "$id" ] && return 0
+    _cloak_curl -X POST "$CLOAK_MANAGER_URL/api/profiles/$id/stop" > /dev/null 2>&1 || true
+}
+
+cloak_delete_profile() {
+    local id="$1"
+    [ -z "$id" ] && return 0
+    _cloak_curl -X DELETE "$CLOAK_MANAGER_URL/api/profiles/$id" > /dev/null 2>&1 || true
+}
+
+# 释放当前 profile：先 stop，再按配置决定是否 delete
+release_browser() {
+    local id="${1:-$CURRENT_PROFILE_ID}"
+    [ -z "$id" ] && return 0
+
+    log_cloak "停止 profile: $id"
+    cloak_stop_profile "$id"
+
+    if [ "$CLOAK_KEEP_PROFILE" != "true" ]; then
+        log_cloak "删除 profile: $id"
+        cloak_delete_profile "$id"
+    else
+        log_cloak "保留 profile: $id (CLOAK_KEEP_PROFILE=true)"
+    fi
+
+    CURRENT_PROFILE_ID=""
 }
 
 # 获取可用的代理节点列表
@@ -163,6 +298,16 @@ ${YELLOW}代理配置（环境变量）：${NC}
   PROXY_GROUP                代理组名称（默认: FixedProxy）
   COMMENT_ON_SUCCESS         成功后是否注释账号行（默认: true）
 
+${YELLOW}CloakBrowser Manager 配置（环境变量）：${NC}
+  CLOAK_MANAGER_URL          Manager 地址（默认: http://localhost:8080）
+  CLOAK_AUTH_TOKEN           Manager API Token（可选）
+  CLOAK_KEEP_PROFILE         任务结束后是否保留 profile（默认: false）
+  CLOAK_PLATFORM             profile 平台标记（默认: linux）
+  CLOAK_PROXY_URL            Manager 容器视角的代理 URL（可选）
+                             未设置时从 PROXY_URL 自动重写 localhost
+                             为 host.docker.internal，例如：
+                             http://localhost:7892 -> http://host.docker.internal:7892
+
 ${YELLOW}批量文件格式：${NC}
 
   ${CYAN}格式 1（管道分隔）：${NC}
@@ -201,9 +346,10 @@ ${YELLOW}示例：${NC}
   USE_PROXY=true PROXY_URL=http://localhost:7892 $0 --batch accounts.txt -a
 
 ${YELLOW}注意：${NC}
-  - 批量模式会为每个账号创建独立的浏览器实例
-  - 每个账号使用独立的用户数据目录，避免 cookie 污染
-  - 启用代理后，每个账号会自动切换到不同的代理节点
+  - 浏览器由 CloakBrowser Manager 托管，需要先启动 Manager（默认 http://localhost:8080）
+  - 每个账号会在 Manager 中创建一个独立 profile，避免 cookie 污染
+  - 默认任务结束后自动删除 profile，可设 CLOAK_KEEP_PROFILE=true 保留
+  - 启用代理后，每个账号会自动切换到不同的代理节点（代理通过 profile.proxy 注入）
   - Session 文件保存在: $SESSION_DIR
   - 批量模式支持两种文件格式，可以混合使用
   - 文件中 # 开头的行会被视为注释跳过
@@ -530,9 +676,9 @@ add_to_aiclient() {
 cleanup() {
     rm -f /tmp/generate_totp.js /tmp/extract_kiro_cookies.js /tmp/extract_refresh_token.js
 
-    # 检查是否有 Chrome 调试进程需要清理
-    if pgrep -f "remote-debugging-port=9222" > /dev/null; then
-        pkill -f "remote-debugging-port=9222" || true
+    # 异常退出时释放当前正在使用的 Manager profile
+    if [ -n "$CURRENT_PROFILE_ID" ]; then
+        release_browser "$CURRENT_PROFILE_ID"
     fi
 }
 
@@ -680,59 +826,40 @@ process_single_account() {
     # 为账号选择代理节点
     select_proxy_for_account "$account_index"
 
-    # 步骤 1: 启动 Chrome 调试模式
-    log_info "步骤 1/10: 启动 Chrome 浏览器"
+    # 步骤 1: 通过 CloakBrowser Manager 创建并启动新 profile
+    log_info "步骤 1/10: 通过 CloakBrowser Manager 启动 profile"
 
-    # 为每个账号创建独立的用户数据目录
-    local chrome_user_data="/tmp/chrome-debug-${email_prefix}-$$"
-
-    # 清理旧的用户数据目录
-    if [ -d "$chrome_user_data" ]; then
-        rm -rf "$chrome_user_data"
-    fi
-
-    # 构建 Chrome 启动参数
-    local chrome_args=(
-        --remote-debugging-port=9222
-        --user-data-dir="$chrome_user_data"
-        --no-first-run
-        --no-default-browser-check
-        --disable-default-apps
-        --disable-popup-blocking
-        --disable-translate
-        --disable-background-networking
-        --disable-sync
-        --metrics-recording-only
-        --disable-breakpad
-        --no-startup-window
-        --disable-features=FocusMode
-        --silent-launch
-        --disable-blink-features=AutomationControlled
-        --disable-features=ChromeSignin
-        --disable-signin-promo
-    )
-
-    # 如果启用代理，添加代理参数
+    local proxy_for_profile=""
     if [ "$USE_PROXY" = "true" ]; then
-        chrome_args+=(--proxy-server="$PROXY_URL")
-        log_proxy "使用代理: $PROXY_URL"
+        proxy_for_profile=$(_cloak_resolve_proxy)
+        log_proxy "宿主代理: $PROXY_URL -> 容器内代理: $proxy_for_profile"
     fi
 
-    /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
-        "${chrome_args[@]}" \
-        > /dev/null 2>&1 &
-
-    CHROME_PID=$!
-    if [ "$USE_PROXY" = "true" ]; then
-        log_success "Chrome 已启动 (PID: $CHROME_PID, 独立实例: ${email_prefix}, 代理: $PROXY_URL)"
-    else
-        log_success "Chrome 已启动 (PID: $CHROME_PID, 独立实例: ${email_prefix})"
+    local profile_name="kiro-${email_prefix}-$(date +%s)"
+    local profile_id
+    if ! profile_id=$(cloak_create_profile "$profile_name" "$proxy_for_profile"); then
+        log_error "  [校验失败] 创建 Manager profile 失败"
+        return 1
     fi
-    sleep 5
+    CURRENT_PROFILE_ID="$profile_id"
+    log_success "Profile 已创建: $profile_id ($profile_name)"
 
-    # 步骤 2: 连接到 Chrome 并打开页面
-    log_info "步骤 2/10: 连接到 Chrome"
-    playwright-cli attach --cdp=http://localhost:9222 > /dev/null 2>&1
+    local cdp_url
+    if ! cdp_url=$(cloak_launch_profile "$profile_id"); then
+        log_error "  [校验失败] 启动 Manager profile 失败"
+        release_browser "$profile_id"
+        return 1
+    fi
+    log_success "Profile 已启动 (CDP: $cdp_url)"
+    sleep 2
+
+    # 步骤 2: 通过 CDP 连接到 profile
+    log_info "步骤 2/10: 通过 CDP 连接到 profile"
+    if ! playwright-cli attach --cdp="$cdp_url" > /dev/null 2>&1; then
+        log_error "  [校验失败] CDP 连接失败: $cdp_url"
+        release_browser "$profile_id"
+        return 1
+    fi
     log_success "已连接"
     sleep 2
 
@@ -788,7 +915,7 @@ process_single_account() {
 
         if [ "$page_loaded" = false ]; then
             log_error "  [超时] 页面仍未加载"
-            kill $CHROME_PID 2>/dev/null || true
+            release_browser "$profile_id"
             return 1
         fi
     fi
@@ -839,7 +966,7 @@ process_single_account() {
 
         if [ "$button_found" = false ]; then
             log_error "  [超时] 仍未找到按钮"
-            kill $CHROME_PID 2>/dev/null || true
+            release_browser "$profile_id"
             return 1
         fi
     fi
@@ -892,7 +1019,7 @@ process_single_account() {
 
         if [ "$google_page_loaded" = false ]; then
             log_error "  [超时] 仍未跳转到 Google 登录页面"
-            kill $CHROME_PID 2>/dev/null || true
+            release_browser "$profile_id"
             return 1
         fi
     fi
@@ -938,7 +1065,7 @@ process_single_account() {
 
         if [ "$email_input_found" = false ]; then
             log_error "  [超时] 仍未找到邮箱输入框"
-            kill $CHROME_PID 2>/dev/null || true
+            release_browser "$profile_id"
             return 1
         fi
     fi
@@ -988,7 +1115,7 @@ process_single_account() {
 
         if [ "$check_success" = false ]; then
             log_error "  [超时] 等待 $MANUAL_INTERVENTION_TIMEOUT 秒后仍未通过验证"
-            kill $CHROME_PID 2>/dev/null || true
+            release_browser "$profile_id"
             return 1
         fi
     else
@@ -1039,7 +1166,7 @@ process_single_account() {
 
         if [ "$password_input_found" = false ]; then
             log_error "  [超时] 仍未找到密码输入框"
-            kill $CHROME_PID 2>/dev/null || true
+            release_browser "$profile_id"
             return 1
         fi
     fi
@@ -1119,7 +1246,7 @@ process_single_account() {
 
         if [ "$totp_input_found" = false ]; then
             log_error "  [超时] 仍未找到 2FA 验证页面"
-            kill $CHROME_PID 2>/dev/null || true
+            release_browser "$profile_id"
             return 1
         fi
     fi
@@ -1231,14 +1358,14 @@ process_single_account() {
     # 保存 session 并检查是否成功
     if ! playwright-cli state-save "$session_file" 2>&1; then
         log_error "  [校验失败] 保存 session 失败"
-        kill $CHROME_PID 2>/dev/null || true
+        release_browser "$profile_id"
         return 1
     fi
 
     # 验证文件是否真的创建了
     if [ ! -f "$session_file" ]; then
         log_error "  [校验失败] Session 文件未创建: $session_file"
-        kill $CHROME_PID 2>/dev/null || true
+        release_browser "$profile_id"
         return 1
     fi
 
@@ -1267,7 +1394,7 @@ EOF
 
     if ! node /tmp/extract_kiro_cookies.js "$session_file" "$kiro_only_session" 2>&1 | grep -q "SUCCESS"; then
         log_error "  [校验失败] 提取 Kiro cookies 失败"
-        kill $CHROME_PID 2>/dev/null || true
+        release_browser "$profile_id"
         return 1
     fi
 
@@ -1321,16 +1448,10 @@ EOF
         fi
     fi
 
-    # 关闭浏览器
+    # 关闭并释放 Manager profile
     log_info "关闭浏览器..."
-    kill $CHROME_PID 2>/dev/null || true
+    release_browser "$profile_id"
     sleep 2
-
-    # 清理独立的用户数据目录
-    if [ -d "$chrome_user_data" ]; then
-        log_info "清理浏览器数据: $chrome_user_data"
-        rm -rf "$chrome_user_data"
-    fi
 
     log_success "账号 [$account_index] 处理完成"
     echo ""
