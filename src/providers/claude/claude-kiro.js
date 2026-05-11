@@ -197,8 +197,37 @@ function getContextTokensForModel(model, config = {}, fallbackModel = null) {
 
     return MODEL_CONTEXT_TOKENS[model] || MODEL_CONTEXT_TOKENS[fallbackModel] || KIRO_CONSTANTS.TOTAL_CONTEXT_TOKENS;
 }
-// 从 provider-models.js 获取支持的模型列表
+// 从 provider-models.js 获取支持的模型列表（全集，对外暴露的就是这个）
 const KIRO_MODELS = getProviderModels(MODEL_PROVIDER.KIRO_API);
+
+// Kiro Free 套餐可用模型白名单（按 Kiro 公开定价推断；如有调整改这里即可）
+// 详见 https://kiro.dev/pricing （Free Tier vs Pro）
+// 其余 Opus / Sonnet 4-6 / 4-7 等高端模型仅 Pro 套餐可用
+const KIRO_FREE_TIER_MODELS = [
+    'claude-haiku-4-5',
+    'claude-haiku-4-5-20251001',
+    'claude-sonnet-4-5',
+    'claude-sonnet-4-5-20250929',
+    'claude-sonnet-4-20250514',
+    'claude-3-7-sonnet-20250219',
+];
+
+/**
+ * 根据订阅信息返回该账号实际可用的模型列表
+ * @param {string} subType  - subscriptionInfo.type，如 Q_DEVELOPER_STANDALONE_FREE / Q_DEVELOPER_STANDALONE_PRO
+ * @param {string} planTitle - subscriptionInfo.subscriptionTitle，如 "KIRO FREE" / "KIRO PRO"
+ * @returns {string[]} 该套餐的可用模型子集（必为 KIRO_MODELS 的子集）
+ */
+export function getKiroModelsForPlan(subType, planTitle) {
+    const t = String(subType || '').toUpperCase();
+    const title = String(planTitle || '').toUpperCase();
+    // 任一字段含 FREE 视为 Free 套餐
+    if (t.includes('FREE') || title.includes('FREE')) {
+        return KIRO_FREE_TIER_MODELS.filter(m => KIRO_MODELS.includes(m));
+    }
+    // 其他套餐（PRO / PRO+ / 付费）→ 全部
+    return [...KIRO_MODELS];
+}
 
 // 完整的模型映射表
 const FULL_MODEL_MAPPING = {
@@ -3378,7 +3407,13 @@ async saveCredentialsToFile(filePath, newData) {
             result.email = userInfo.email;
             result.userId = userId;
 
-            logger.info(`[Kiro] Credits 查询成功: ${result.totalUsed}/${result.totalAvailable} (${Math.round((result.totalUsed / result.totalAvailable) * 100)}%)`);
+            // 计算该套餐可用模型列表（前端会写回 provider 的 supportedModels）
+            result.availableModels = getKiroModelsForPlan(
+                result.subscriptionInfo?.type,
+                result.planType
+            );
+
+            logger.info(`[Kiro] Credits 查询成功: ${result.totalUsed}/${result.totalAvailable} (${Math.round((result.totalUsed / result.totalAvailable) * 100)}%), 套餐可用模型数=${result.availableModels.length}`);
 
             return result;
         } catch (error) {

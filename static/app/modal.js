@@ -1380,23 +1380,39 @@ async function loadKiroCreditsSummary(uuid, providerType, slot) {
         slot.dataset.loaded = 'true';
         renderKiroCreditsSummaryInto(slot, data);
 
-        // 把 email 写回 customName（如果不一致）
+        // 同步 customName(=email) 和 supportedModels(=该套餐可用模型) 到 provider 配置
         const fetchedEmail = data?.credits?.email;
-        if (fetchedEmail) {
+        const planModels = data?.credits?.availableModels;
+        if (fetchedEmail || (Array.isArray(planModels) && planModels.length > 0)) {
             const current = currentProviders.find(p => p.uuid === uuid);
-            if (current && (current.customName || '').trim() !== fetchedEmail) {
-                try {
-                    await window.apiClient.put(
-                        `/providers/${encodeURIComponent(providerType)}/${uuid}`,
-                        { providerConfig: { customName: fetchedEmail } }
-                    );
-                    // 更新内存数据但不重渲染整页（避免破坏当前展开状态）
-                    current.customName = fetchedEmail;
-                    const headerName = document.querySelector(`.provider-item-detail[data-uuid="${uuid}"] .provider-name`);
-                    if (headerName) {
-                        headerName.childNodes[0].nodeValue = fetchedEmail + ' ';
-                    }
-                } catch (e) { console.warn('Auto-update customName failed:', e); }
+            if (current) {
+                const patch = {};
+                const currentName = (current.customName || '').trim();
+                if (fetchedEmail && currentName !== fetchedEmail) {
+                    patch.customName = fetchedEmail;
+                }
+                if (Array.isArray(planModels) && planModels.length > 0) {
+                    const cur = Array.isArray(current.supportedModels) ? current.supportedModels : [];
+                    // 仅当不一致时才写回，避免无意义 PUT
+                    const same = cur.length === planModels.length && cur.every(m => planModels.includes(m));
+                    if (!same) patch.supportedModels = planModels;
+                }
+                if (Object.keys(patch).length > 0) {
+                    try {
+                        await window.apiClient.put(
+                            `/providers/${encodeURIComponent(providerType)}/${uuid}`,
+                            { providerConfig: patch }
+                        );
+                        // 更新内存数据但不重渲染整页（避免破坏当前展开状态）
+                        Object.assign(current, patch);
+                        if (patch.customName) {
+                            const headerName = document.querySelector(`.provider-item-detail[data-uuid="${uuid}"] .provider-name`);
+                            if (headerName) {
+                                headerName.childNodes[0].nodeValue = patch.customName + ' ';
+                            }
+                        }
+                    } catch (e) { console.warn('Auto-update provider config failed:', e); }
+                }
             }
         }
     } catch (error) {
