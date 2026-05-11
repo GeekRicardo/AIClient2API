@@ -658,6 +658,7 @@ async loadCredentials() {
         applyCredential('profileArn');
         applyCredential('region');
         applyCredential('idcRegion');
+        applyCredential('provider'); // Kiro 凭证里的 IdentityProvider，如 Google / GitHub
 
         if (!this.region) {
             logger.warn('[Kiro Auth] Region not found in credentials. Using default region us-east-1 for URLs.');
@@ -3182,11 +3183,20 @@ async saveCredentialsToFile(filePath, newData) {
                 throw new Error('缺少必需的凭证信息: accessToken');
             }
 
+            // IdentityProvider 来源优先级：
+            //   1. 配置覆盖 KIRO_IDENTITY_PROVIDER
+            //   2. 凭证文件里的 provider 字段（Google / GitHub）
+            //   3. 按 authMethod 兜底：social -> Google，否则 BuilderID
+            const identityProvider = this.config.KIRO_IDENTITY_PROVIDER
+                || this.provider
+                || (this.authMethod === 'social' || this.authMethod === 'Social' ? 'Google' : 'BuilderID');
+
             // 先获取用户信息（包括 userId）
-            logger.info('[Kiro] 获取用户信息...');
+            logger.info(`[Kiro] 获取用户信息... (IdentityProvider=${identityProvider})`);
             const userInfo = await getKiroUserInfo({
                 accessToken,
-                profileArn: this.profileArn
+                profileArn: this.profileArn,
+                identityProvider
             });
 
             const userId = userInfo.userId;
@@ -3198,7 +3208,8 @@ async saveCredentialsToFile(filePath, newData) {
             const result = await getKiroCredits({
                 accessToken,
                 userId,
-                visitorId
+                visitorId,
+                identityProvider
             });
 
             // 添加用户信息到结果中

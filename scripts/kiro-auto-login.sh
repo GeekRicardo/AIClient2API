@@ -16,10 +16,11 @@ NC='\033[0m' # No Color
 
 # 默认配置
 SESSION_DIR="$HOME/kiro-sessions"
-AICLIENT_API_URL="http://localhost:3300"
+AICLIENT_API_URL="http://aiclient2api.sshug.cn"
 ADD_TO_AICLIENT=false
 BATCH_MODE=false
 BATCH_FILE=""
+ACCOUNT_LINE=""
 # 失败后等待时间（秒），允许人工介入，默认 60 秒
 MANUAL_INTERVENTION_TIMEOUT="${MANUAL_INTERVENTION_TIMEOUT:-60}"
 # 代理配置
@@ -36,6 +37,8 @@ CLOAK_MANAGER_URL="${CLOAK_MANAGER_URL:-http://localhost:8080}"
 CLOAK_AUTH_TOKEN="${CLOAK_AUTH_TOKEN:-}"
 # 任务结束后是否保留 profile（默认删除，保持环境干净）
 CLOAK_KEEP_PROFILE="${CLOAK_KEEP_PROFILE:-false}"
+# --manual：脚本退出时不关闭浏览器、不停止/删除 profile，留给用户手工操作（抓包/调试）
+MANUAL_MODE="${MANUAL_MODE:-false}"
 # Manager 内 Chrome 运行的平台标记
 CLOAK_PLATFORM="${CLOAK_PLATFORM:-linux}"
 # Manager 容器视角的代理地址。未设置时从 PROXY_URL 自动转换：
@@ -182,6 +185,15 @@ release_browser() {
     local id="${1:-$CURRENT_PROFILE_ID}"
     [ -z "$id" ] && return 0
 
+    # --manual / MANUAL_MODE=true：完全跳过关闭+删除，保留 profile 给用户手工操作
+    if [ "$MANUAL_MODE" = "true" ]; then
+        log_cloak "[manual] 保留 profile 不关闭：$id"
+        log_cloak "[manual] VNC 端口可在 GET http://localhost:8080/api/profiles/$id 查询"
+        log_cloak "[manual] 清理时手动执行：curl -X POST http://localhost:8080/api/profiles/$id/stop && curl -X DELETE http://localhost:8080/api/profiles/$id"
+        CURRENT_PROFILE_ID=""
+        return 0
+    fi
+
     log_cloak "停止 profile: $id"
     cloak_stop_profile "$id"
 
@@ -286,6 +298,8 @@ ${YELLOW}选项：${NC}
   -a, --add-to-aiclient      登录成功后自动添加到 AIClient2API
   -u, --api-url URL          AIClient2API 地址（默认: http://localhost:3300）
   -b, --batch FILE           批量处理模式，从文件读取账号信息
+  --account-line LINE        直接指定单行账号（同批量文件格式）
+  --manual                   登录完成后不关闭浏览器/不删除 profile（用于手工调试/抓包）
   --use-proxy                启用代理（每个账号自动切换节点）
   --no-comment               成功后不注释账号行（默认会注释）
   -h, --help                 显示此帮助信息
@@ -332,6 +346,10 @@ ${YELLOW}示例：${NC}
 
   # 单账号命令行参数
   $0 -e user@gmail.com -p mypassword -t JBSWY3DPEHPK3PXP
+
+  # 指定单行账号（---- 或 | 分隔均可）
+  $0 --account-line "user@gmail.com----password----recovery@hotmail.com----TOTP2FA" -a
+  $0 --account-line "user@gmail.com|password|recovery@hotmail.com|TOTP2FA" -a
 
   # 批量处理
   $0 --batch accounts.txt --add-to-aiclient
@@ -626,6 +644,48 @@ login_to_aiclient() {
 }
 
 # 添加到 AIClient2API（使用批量导入 API）
+# 把 email 作为 customName 写回刚导入的 kiro provider
+# 参数：$1 = auth_token, $2 = 凭证文件路径(由 batch-import 返回), $3 = email
+update_provider_custom_name() {
+    local auth_token="$1"
+    local cred_path="$2"
+    local email="$3"
+
+    # 1. 拉 claude-kiro-oauth provider 列表，找到 KIRO_OAUTH_CREDS_FILE_PATH 匹配的 uuid
+    local providers_resp=$(curl -s -X GET "$AICLIENT_API_URL/api/providers/claude-kiro-oauth" \
+        -H "Authorization: Bearer $auth_token")
+    local target_uuid=$(echo "$providers_resp" | node -e "
+let buf='';process.stdin.on('data',c=>buf+=c);process.stdin.on('end',()=>{
+  try {
+    const data = JSON.parse(buf);
+    const cp = process.argv[1];
+    const norm = s => (s || '').replace(/\\\\/g, '/').replace(/^\\.\\//, '');
+    const target = norm(cp);
+    const p = (data.providers || []).find(p => norm(p.KIRO_OAUTH_CREDS_FILE_PATH) === target);
+    if (p) console.log(p.uuid);
+  } catch (e) {}
+});
+" "$cred_path" 2>/dev/null)
+
+    if [ -z "$target_uuid" ]; then
+        log_warning "  [customName] 未找到 cred_path=$cred_path 对应的 provider，跳过 customName 设置"
+        return 1
+    fi
+    log_info "  [customName] 匹配到 provider uuid=$target_uuid"
+
+    # 2. PUT 更新 customName
+    local update_resp=$(curl -s -X PUT "$AICLIENT_API_URL/api/providers/claude-kiro-oauth/$target_uuid" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $auth_token" \
+        -d "{\"providerConfig\":{\"customName\":\"$email\"}}")
+
+    if echo "$update_resp" | grep -q '"success":true\|"customName"'; then
+        log_success "  [customName] 已设置: $email"
+    else
+        log_warning "  [customName] 设置失败: $(echo "$update_resp" | head -c 200)"
+    fi
+}
+
 add_to_aiclient() {
     local email="$1"
     local refresh_token="$2"
@@ -660,6 +720,10 @@ add_to_aiclient() {
         local cred_path=$(echo "$response" | grep -o '"path":"[^"]*"' | head -1 | cut -d'"' -f4)
         if [ -n "$cred_path" ]; then
             log_info "  凭证文件: $cred_path"
+            # 把 email 作为 customName 写回到刚刚导入的 provider
+            update_provider_custom_name "$auth_token" "$cred_path" "$email"
+        else
+            log_warning "  [校验] 响应中未找到 cred path，无法设置 customName"
         fi
         return 0
     else
@@ -713,6 +777,14 @@ parse_args() {
                 BATCH_MODE=true
                 BATCH_FILE="$2"
                 shift 2
+                ;;
+            --account-line)
+                ACCOUNT_LINE="$2"
+                shift 2
+                ;;
+            --manual)
+                MANUAL_MODE=true
+                shift
                 ;;
             --use-proxy)
                 USE_PROXY=true
@@ -1071,7 +1143,17 @@ process_single_account() {
     fi
 
     sleep 2
-    playwright-cli fill "getByRole('textbox', { name: '邮箱或电话号码' })" "$email" > /dev/null 2>&1
+    if ! playwright-cli fill "input[type=email]" "$email" 2>&1 | tail -3; then
+        log_error "  [校验失败] 填写邮箱失败"
+        release_browser "$profile_id"
+        return 1
+    fi
+    local filled_email=$(playwright-cli --raw eval "document.querySelector('input[type=email]').value" 2>/dev/null | sed 's/^"//;s/"$//')
+    if [ "$filled_email" != "$email" ]; then
+        log_error "  [校验失败] 邮箱填写未生效（实际值: '$filled_email'）"
+        release_browser "$profile_id"
+        return 1
+    fi
     log_success "已填写邮箱: $email"
     sleep 2
 
@@ -1079,7 +1161,11 @@ process_single_account() {
     log_info "步骤 6/10: 提交邮箱"
 
     log_info "  [校验] 点击「下一步」按钮"
-    playwright-cli click "getByRole('button', { name: '下一步' })" > /dev/null 2>&1
+    if ! playwright-cli click "#identifierNext button" 2>&1 | tail -3; then
+        log_error "  [校验失败] 点击邮箱下一步失败"
+        release_browser "$profile_id"
+        return 1
+    fi
     log_success "  [校验通过] 已点击提交"
     sleep 5
 
@@ -1172,7 +1258,17 @@ process_single_account() {
     fi
 
     sleep 2
-    playwright-cli fill "getByRole('textbox', { name: '输入您的密码' })" "$password" > /dev/null 2>&1
+    if ! playwright-cli fill "input[type=password]" "$password" 2>&1 | tail -3; then
+        log_error "  [校验失败] 填写密码失败"
+        release_browser "$profile_id"
+        return 1
+    fi
+    local pwd_len=$(playwright-cli --raw eval "document.querySelector('input[type=password]').value.length" 2>/dev/null | tr -d '"')
+    if [ "$pwd_len" != "${#password}" ]; then
+        log_error "  [校验失败] 密码填写未生效（长度=$pwd_len, 期望=${#password}）"
+        release_browser "$profile_id"
+        return 1
+    fi
     log_success "  [校验通过] 已填写密码"
     sleep 2
 
@@ -1180,7 +1276,11 @@ process_single_account() {
     log_info "步骤 8/10: 提交密码"
 
     log_info "  [校验] 点击「下一步」按钮"
-    playwright-cli click "getByRole('button', { name: '下一步' })" > /dev/null 2>&1
+    if ! playwright-cli click "#passwordNext button" 2>&1 | tail -3; then
+        log_error "  [校验失败] 点击密码下一步失败"
+        release_browser "$profile_id"
+        return 1
+    fi
     log_success "  [校验通过] 已点击提交"
     sleep 5
 
@@ -1255,18 +1355,33 @@ process_single_account() {
     log_success "  [校验] 生成 2FA 验证码: $TOTP_CODE"
 
     sleep 2
-    playwright-cli fill "getByRole('textbox', { name: '输入验证码' })" "$TOTP_CODE" > /dev/null 2>&1
+    if ! playwright-cli fill "#totpPin" "$TOTP_CODE" 2>&1 | tail -3; then
+        log_error "  [校验失败] 填写验证码失败"
+        release_browser "$profile_id"
+        return 1
+    fi
+    local totp_filled=$(playwright-cli --raw eval "document.querySelector('#totpPin').value" 2>/dev/null | sed 's/^"//;s/"$//')
+    if [ "$totp_filled" != "$TOTP_CODE" ]; then
+        log_error "  [校验失败] 验证码填写未生效（实际值: '$totp_filled'）"
+        release_browser "$profile_id"
+        return 1
+    fi
     log_success "  [校验通过] 已填写验证码"
     sleep 2
 
     log_info "  [校验] 点击「下一步」提交验证码"
-    playwright-cli click "getByRole('button', { name: '下一步' })" > /dev/null 2>&1
-    log_success "  [校验通过] 已提交验证码"
+    if ! playwright-cli click "#totpNext button" 2>&1 | tail -3; then
+        log_error "  [校验失败] 点击验证码下一步失败"
+        release_browser "$profile_id"
+        return 1
+    fi
+    log_success "  [校验通过] 已提交验证码 sleep 8"
     sleep 8
 
     # 检查是否需要授权（Kiro OAuth 页面）
     retry=0
     while [ $retry -lt 10 ]; do
+        log_info "检测是否到达 Kiro OAuth 授权页面... (尝试 $((retry+1))/10)"
         CURRENT_URL=$(playwright-cli --raw eval "window.location.href" 2>/dev/null || echo "")
         CURRENT_TITLE=$(playwright-cli --raw eval "document.title" 2>/dev/null || echo "")
 
@@ -1448,6 +1563,10 @@ EOF
         fi
     fi
 
+    # 步骤 11: 点击 Upgrade to Pro 并捕获 Stripe 链接
+    log_info "步骤 11: 点击 Upgrade to Pro 并捕获 Stripe 链接"
+    capture_stripe_upgrade_url "$email"
+
     # 关闭并释放 Manager profile
     log_info "关闭浏览器..."
     release_browser "$profile_id"
@@ -1455,6 +1574,61 @@ EOF
 
     log_success "账号 [$account_index] 处理完成"
     echo ""
+}
+
+# 点击 Upgrade to Pro 并把跳转的 Stripe URL 保存到 scripts/stripe-urls/<email>.txt
+# 需要在 release_browser 之前调用，依赖当前 playwright-cli 已 attach 到浏览器
+capture_stripe_upgrade_url() {
+    local email="$1"
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local stripe_dir="$script_dir/stripe-urls"
+    mkdir -p "$stripe_dir"
+    local stripe_file="$stripe_dir/${email}.txt"
+
+    # 1. 确保在 Kiro 账号页
+    local cur=$(playwright-cli --raw eval "window.location.href" 2>/dev/null | sed 's/^"//;s/"$//')
+    if [[ "$cur" != *"app.kiro.dev"* ]] || [[ "$cur" == *"signin"* ]]; then
+        playwright-cli goto "https://app.kiro.dev/account/usage" 2>&1 | tail -1 || true
+        sleep 4
+    fi
+
+    # 2. 精确匹配文本为 "Upgrade to Pro" 的按钮（避开 "Upgrade to Pro+" / "Upgrade to Power"）
+    local click_result=$(playwright-cli --raw eval "
+        (() => {
+            const els = Array.from(document.querySelectorAll('a, button, [role=button]'));
+            const m = els.find(e => /^upgrade to pro$/i.test((e.textContent||'').trim()));
+            if (!m) return 'NOT_FOUND';
+            m.scrollIntoView();
+            m.click();
+            return 'CLICKED';
+        })()
+    " 2>/dev/null | sed 's/^"//;s/"$//')
+
+    if [[ "$click_result" != "CLICKED" ]]; then
+        log_warning "  [跳过] 未找到 'Upgrade to Pro' 按钮（结果: $click_result）"
+        return 0
+    fi
+    log_info "  [校验] 已点击 Upgrade to Pro 按钮，等待 Stripe 新 tab..."
+
+    # 3. 轮询 tab-list 找 stripe.com 的 tab（最多 15 秒）
+    local stripe_url=""
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        sleep 1
+        stripe_url=$(playwright-cli tab-list 2>&1 | grep -oE 'https://[^])[:space:]]*stripe\.com[^])[:space:]]*' | head -1)
+        if [ -n "$stripe_url" ]; then
+            break
+        fi
+    done
+
+    if [ -n "$stripe_url" ]; then
+        echo "$stripe_url" > "$stripe_file"
+        log_success "  [校验通过] Stripe URL 已保存: $stripe_file"
+        log_info "  URL[0..100]: ${stripe_url:0:100}"
+    else
+        log_warning "  [校验失败] 15 秒内未出现 Stripe tab"
+        log_info "  当前 tab 列表:"
+        playwright-cli tab-list 2>&1 | grep '^- ' | head -5 | while read -r ln; do log_info "    $ln"; done
+    fi
 }
 
 # 注释掉批量文件中的指定行
@@ -1567,6 +1741,34 @@ main() {
     # 批量处理模式
     if [ "$BATCH_MODE" = true ]; then
         batch_process
+        exit 0
+    fi
+
+    # --account-line 单行模式（复用批量文件的解析逻辑）
+    if [ -n "$ACCOUNT_LINE" ]; then
+        local al_email="" al_password="" al_totp=""
+        if [[ "$ACCOUNT_LINE" =~ ---- ]]; then
+            al_email=$(echo "$ACCOUNT_LINE"    | cut -d'-' -f1  | xargs)
+            al_password=$(echo "$ACCOUNT_LINE" | cut -d'-' -f5  | xargs)
+            al_totp=$(echo "$ACCOUNT_LINE"     | cut -d'-' -f13- | xargs)
+        elif [[ "$ACCOUNT_LINE" =~ \| ]]; then
+            IFS='|' read -r al_email al_password _ al_totp _ _ <<< "$ACCOUNT_LINE"
+            al_email=$(echo "$al_email" | xargs)
+            al_password=$(echo "$al_password" | xargs)
+            al_totp=$(echo "$al_totp" | xargs)
+        else
+            log_error "--account-line 格式不正确，请使用 ---- 或 | 分隔"
+            exit 1
+        fi
+
+        if [ -z "$al_email" ] || [ -z "$al_password" ] || [ -z "$al_totp" ]; then
+            log_error "--account-line 缺少必需字段（邮箱/密码/2FA）"
+            exit 1
+        fi
+
+        al_totp=$(echo "$al_totp" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
+        log_info "使用 --account-line 指定账号: $al_email"
+        process_single_account "$al_email" "$al_password" "$al_totp" "1"
         exit 0
     fi
 

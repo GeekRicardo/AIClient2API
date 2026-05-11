@@ -16,7 +16,8 @@ import cbor from 'cbor';
 export async function getKiroUserInfo(options) {
   const {
     accessToken,
-    profileArn = 'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK'
+    profileArn = 'arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK',
+    identityProvider = 'Google'
   } = options;
 
   if (!accessToken) {
@@ -24,6 +25,7 @@ export async function getKiroUserInfo(options) {
   }
 
   // 构建请求体（CBOR 格式）
+  // origin 只能是 KIRO_IDE / UNKNOWN / KIRO_CLI
   const requestBody = {
     origin: 'KIRO_IDE',
     profileArn
@@ -32,8 +34,11 @@ export async function getKiroUserInfo(options) {
   // 编码为 CBOR
   const cborData = cbor.encode(requestBody);
 
-  // 构建 Cookie header
-  const cookieHeader = `AccessToken=${accessToken}`;
+  // 构建 Cookie header（Idp 是 Kiro web portal 鉴权必需 cookie，缺失会 401 "Identity provider is required"）
+  const cookieHeader = [
+    `AccessToken=${accessToken}`,
+    `Idp=${identityProvider}`
+  ].join('; ');
 
   // 构建请求选项
   const requestOptions = {

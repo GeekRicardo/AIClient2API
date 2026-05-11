@@ -19,7 +19,8 @@ async function callKiroAPI(options) {
   const {
     accessToken,
     userId,
-    visitorId = ''
+    visitorId = '',
+    identityProvider = 'Google'
   } = options;
 
   if (!accessToken || !userId) {
@@ -27,6 +28,7 @@ async function callKiroAPI(options) {
   }
 
   // 构建请求体（CBOR 格式）
+  // origin 只能是 KIRO_IDE / UNKNOWN / KIRO_CLI
   const requestBody = {
     origin: 'KIRO_IDE',
     isEmailRequired: false,
@@ -36,10 +38,11 @@ async function callKiroAPI(options) {
   // 编码为 CBOR
   const cborData = cbor.encode(requestBody);
 
-  // 构建 Cookie header
+  // 构建 Cookie header（Idp 是 Kiro web portal 鉴权必需 cookie，缺失会 401 "Identity provider is required"）
   const cookieHeader = [
     `AccessToken=${accessToken}`,
     `UserId=${userId}`,
+    `Idp=${identityProvider}`,
     `kiro-visitor-id=${visitorId}`
   ].join('; ');
 
@@ -111,6 +114,8 @@ function parseAPIResponse(apiResponse) {
     totalUsed: 0,
     totalAvailable: 0,
     daysUntilReset: 0,
+    nextDateReset: null,        // Kiro 返回的下次重置 ISO 日期，如 2026-06-01T00:00:00.000Z
+    freeTrialExpiry: null,      // Free Trial 到期日期（如适用）
     subscriptionInfo: null
   };
 
@@ -132,8 +137,15 @@ function parseAPIResponse(apiResponse) {
       };
     }
 
-    // 提取重置天数
-    result.daysUntilReset = apiResponse.daysUntilReset || 0;
+    // 提取下次重置日期：优先顶层 nextDateReset，否则用列表第一项的 nextDateReset
+    const resetIso = apiResponse.nextDateReset
+      || (Array.isArray(apiResponse.usageBreakdownList) && apiResponse.usageBreakdownList[0]?.nextDateReset)
+      || null;
+    if (resetIso) {
+      result.nextDateReset = resetIso;
+      const diffMs = new Date(resetIso).getTime() - Date.now();
+      result.daysUntilReset = Math.max(0, Math.ceil(diffMs / 86400000));
+    }
 
     // 解析使用情况列表
     if (apiResponse.usageBreakdownList && Array.isArray(apiResponse.usageBreakdownList)) {
@@ -142,13 +154,20 @@ function parseAPIResponse(apiResponse) {
         if (item.freeTrialInfo) {
           const used = item.freeTrialInfo.currentUsage || 0;
           const total = item.freeTrialInfo.usageLimit || 0;
-          const daysLeft = result.daysUntilReset;
+          const expiryIso = item.freeTrialInfo.freeTrialExpiry || null;
+          let trialDaysLeft = result.daysUntilReset;
+          if (expiryIso) {
+            const ms = new Date(expiryIso).getTime() - Date.now();
+            trialDaysLeft = Math.max(0, Math.ceil(ms / 86400000));
+            result.freeTrialExpiry = expiryIso;
+          }
 
           result.bonusCredits = {
             used,
             total,
             remaining: total - used,
-            daysLeft,
+            daysLeft: trialDaysLeft,
+            expiry: expiryIso,
             percentage: total > 0 ? Math.round((used / total) * 100) : 0,
             status: item.freeTrialInfo.freeTrialStatus
           };

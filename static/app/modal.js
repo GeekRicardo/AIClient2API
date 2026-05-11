@@ -620,7 +620,12 @@ function goToProviderPage(page) {
     if (modalBody) {
         modalBody.scrollTop = 0;
     }
-    
+
+    // Kiro 类型：列表渲染完后批量拉 credits 摘要（异步，不阻塞 UI）
+    if (currentProviderType && /kiro/i.test(currentProviderType)) {
+        setTimeout(() => batchLoadKiroCreditsSummaries(), 50);
+    }
+
     // 为当前页的提供商加载模型列表
     const startIndex = (page - 1) * PROVIDERS_PER_PAGE;
     const endIndex = Math.min(startIndex + PROVIDERS_PER_PAGE, filteredProviders.length);
@@ -903,6 +908,10 @@ function renderProviderDetailList(providers) {
                                 <span data-i18n="modal.provider.checkModel">检测模型</span>: ${lastHealthCheckModel}
                             </span>
                         </div>
+                        ${/kiro/i.test(currentProviderType) ? `
+                        <div class="provider-credits-summary" id="credits-summary-${provider.uuid}" data-loaded="false" style="font-size:12px;color:var(--text-secondary);margin-top:4px;">
+                            <i class="fas fa-wallet" style="margin-right:4px;"></i>Credits: <span class="credits-summary-text" style="color:var(--text-tertiary);"><i class="fas fa-spinner fa-spin"></i> 等待加载...</span>
+                        </div>` : ''}
                         ${errorInfoHtml}
                     </div>
                     <div class="provider-actions-group">
@@ -915,6 +924,10 @@ function renderProviderDetailList(providers) {
                         <button class="btn-small btn-info btn-provider-health-check" onclick="window.performSingleHealthCheck('${provider.uuid}', event)" title="${t('modal.provider.healthCheckCurrentTitle')}">
                             <i class="fas fa-stethoscope"></i> <span data-i18n="modal.provider.healthCheck">${t('modal.provider.healthCheck')}</span>
                         </button>
+                        ${/kiro/i.test(currentProviderType) ? `
+                        <button class="btn-small btn-secondary btn-view-credits" onclick="window.viewKiroCredits('${provider.uuid}', event)" title="查看 Kiro Credits 用量与套餐">
+                            <i class="fas fa-wallet"></i> <span>Credits</span>
+                        </button>` : ''}
                         <button class="btn-small btn-delete" onclick="window.deleteProvider('${provider.uuid}', event)">
                             <i class="fas fa-trash"></i> <span data-i18n="modal.provider.delete">删除</span>
                         </button>
@@ -972,6 +985,10 @@ function renderProviderCardList(providers) {
                     <button class="card-action-btn ${toggleButtonClass}" onclick="window.toggleProviderStatus('${provider.uuid}', event)" title="${toggleButtonText}">
                         <i class="${toggleButtonIcon}"></i>
                     </button>
+                    ${/kiro/i.test(currentProviderType) ? `
+                    <button class="card-action-btn btn-secondary" onclick="window.viewKiroCredits('${provider.uuid}', event)" title="查看 Kiro Credits">
+                        <i class="fas fa-wallet"></i>
+                    </button>` : ''}
                     <button class="card-action-btn btn-delete" onclick="window.deleteProvider('${provider.uuid}', event)" title="${t('modal.provider.delete')}">
                         <i class="fas fa-trash"></i>
                     </button>
@@ -1308,6 +1325,144 @@ function toggleProviderDetails(uuid) {
     if (content) {
         content.classList.toggle('expanded');
     }
+}
+
+/**
+ * 批量并发拉取所有 kiro provider 的 credits 摘要
+ * 入口：每次进入「管理 claude-kiro-oauth 提供商配置」面板或翻页后调用
+ */
+async function batchLoadKiroCreditsSummaries() {
+    if (!currentProviderType || !/kiro/i.test(currentProviderType)) return;
+
+    // 找到当前已渲染但还未加载过的 slot
+    const slots = Array.from(document.querySelectorAll('[id^="credits-summary-"]'))
+        .filter(s => s.dataset.loaded === 'false');
+    if (slots.length === 0) return;
+
+    const CONCURRENCY = 4;
+    let idx = 0;
+    const worker = async () => {
+        while (idx < slots.length) {
+            const my = slots[idx++];
+            if (!my || my.dataset.loaded !== 'false') continue;
+            my.dataset.loaded = 'pending';
+            const uuid = my.id.replace('credits-summary-', '');
+            try {
+                await loadKiroCreditsSummary(uuid, currentProviderType, my);
+            } catch (e) {
+                console.warn('[batch credits]', uuid, e);
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+}
+
+/**
+ * 拉取 kiro provider 的 credits 摘要并渲染到行内 slot
+ */
+async function loadKiroCreditsSummary(uuid, providerType, slot) {
+    const textEl = slot.querySelector('.credits-summary-text');
+    if (textEl) textEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 加载中...';
+
+    try {
+        let data;
+        try {
+            data = await window.apiClient.get(`/providers/${encodeURIComponent(providerType)}/${uuid}/credits`);
+        } catch (err) {
+            const msg = String(err?.message || err || '');
+            if (/Service instance not found|does not support credits/i.test(msg)) {
+                await window.apiClient.post(`/providers/${encodeURIComponent(providerType)}/${uuid}/health-check`, {});
+                data = await window.apiClient.get(`/providers/${encodeURIComponent(providerType)}/${uuid}/credits`);
+            } else {
+                throw err;
+            }
+        }
+        slot.dataset.loaded = 'true';
+        renderKiroCreditsSummaryInto(slot, data);
+
+        // 把 email 写回 customName（如果不一致）
+        const fetchedEmail = data?.credits?.email;
+        if (fetchedEmail) {
+            const current = currentProviders.find(p => p.uuid === uuid);
+            if (current && (current.customName || '').trim() !== fetchedEmail) {
+                try {
+                    await window.apiClient.put(
+                        `/providers/${encodeURIComponent(providerType)}/${uuid}`,
+                        { providerConfig: { customName: fetchedEmail } }
+                    );
+                    // 更新内存数据但不重渲染整页（避免破坏当前展开状态）
+                    current.customName = fetchedEmail;
+                    const headerName = document.querySelector(`.provider-item-detail[data-uuid="${uuid}"] .provider-name`);
+                    if (headerName) {
+                        headerName.childNodes[0].nodeValue = fetchedEmail + ' ';
+                    }
+                } catch (e) { console.warn('Auto-update customName failed:', e); }
+            }
+        }
+    } catch (error) {
+        slot.dataset.loaded = 'false'; // allow retry next time
+        if (textEl) textEl.innerHTML = `<span style="color:var(--text-danger,#dc3545);">查询失败: ${(error.message || error).toString().slice(0, 80)}</span>`;
+        console.error('[Kiro Credits Summary] failed:', error);
+    }
+}
+
+// 用量百分比 → 颜色：>=80% 红，>=60% 黄，否则绿
+function _usageColor(pct) {
+    if (pct >= 80) return '#dc3545'; // red
+    if (pct >= 60) return '#f59e0b'; // amber
+    return '#10b981';                // green
+}
+// 剩余天数 → 颜色：<=3 红，<=7 黄，否则绿
+function _daysColor(d) {
+    if (d <= 3) return '#dc3545';
+    if (d <= 7) return '#f59e0b';
+    return '#10b981';
+}
+
+function renderKiroCreditsSummaryInto(slot, data) {
+    const c = data.credits || {};
+    const planType = c.planType || 'UNKNOWN';
+    const isFree = /free/i.test(planType);
+    const email = c.email || '-';
+    const bonus = c.bonusCredits;
+    const plan = c.planCredits;
+    const days = c.daysUntilReset;
+
+    const planBadge = `<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:11px;font-weight:600;background:${isFree ? 'var(--bg-secondary)' : '#10b981'};color:${isFree ? 'var(--text-secondary)' : '#fff'};margin-right:6px;">${planType}</span>`;
+
+    const parts = [];
+    if (bonus) {
+        const pct = bonus.percentage ?? (bonus.total > 0 ? Math.round(bonus.used / bonus.total * 100) : 0);
+        const color = _usageColor(pct);
+        parts.push(`<span style="color:${color};font-weight:600;">Bonus ${bonus.used}/${bonus.total} (${pct}%)</span>`);
+    }
+    if (plan) {
+        const pct = plan.percentage ?? (plan.covered > 0 ? Math.round(plan.used / plan.covered * 100) : 0);
+        const color = _usageColor(pct);
+        parts.push(`<span style="color:${color};font-weight:600;">Plan ${plan.used}/${plan.covered} (${pct}%)</span>`);
+    }
+    if (c.nextDateReset) {
+        const d = new Date(c.nextDateReset);
+        const dateStr = `${d.getMonth() + 1}/${d.getDate()}`;
+        const color = _daysColor(days);
+        parts.push(`<span style="color:${color};font-weight:600;" title="月度 Plan Credits 重置">重置 ${dateStr} (${days}天)</span>`);
+    } else if (days > 0) {
+        const color = _daysColor(days);
+        parts.push(`<span style="color:${color};font-weight:600;">${days}天后重置</span>`);
+    }
+    if (c.freeTrialExpiry) {
+        const d = new Date(c.freeTrialExpiry);
+        const dateStr = `${d.getMonth() + 1}/${d.getDate()}`;
+        const ms = d.getTime() - Date.now();
+        const trialDays = Math.max(0, Math.ceil(ms / 86400000));
+        const color = _daysColor(trialDays);
+        parts.push(`<span style="color:${color};font-weight:600;" title="Free Trial 到期，Bonus credits 失效">Trial ${dateStr} (${trialDays}天)</span>`);
+    }
+    parts.push(`📧 ${email}`);
+
+    slot.innerHTML = `
+        <i class="fas fa-wallet" style="margin-right:4px;"></i>${planBadge}<span style="color:var(--text-secondary);">${parts.join(' | ')}</span>
+    `;
 }
 
 /**
@@ -2207,6 +2362,152 @@ function renderNotSupportedModelsSelector(uuid, models, notSupportedModels = [])
     container.innerHTML = html;
 }
 
+/**
+ * 查询并展示 Kiro provider 的 credits / 套餐 / 重置天数
+ * 若首次查询时 service 实例未初始化，会先触发一次健康检测再重试
+ */
+async function viewKiroCredits(uuid, event) {
+    event.stopPropagation();
+    const button = event.currentTarget || event.target.closest('button');
+    const providerDetail = event.target.closest('.provider-item-detail, .provider-item-card');
+    const providerType = providerDetail?.closest('.provider-modal')?.getAttribute('data-provider-type');
+
+    if (!providerType) {
+        showToast(t('common.error'), 'Provider type not found', 'error');
+        return;
+    }
+
+    const originalHtml = button ? button.innerHTML : '';
+    if (button) {
+        button.disabled = true;
+        button.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    }
+
+    try {
+        let data;
+        try {
+            data = await window.apiClient.get(`/providers/${encodeURIComponent(providerType)}/${uuid}/credits`);
+        } catch (err) {
+            const msg = String(err?.message || err || '');
+            if (/Service instance not found|does not support credits/i.test(msg)) {
+                showToast(t('common.info'), '首次查询需初始化，正在执行健康检测...', 'info');
+                await window.apiClient.post(`/providers/${encodeURIComponent(providerType)}/${uuid}/health-check`, {});
+                data = await window.apiClient.get(`/providers/${encodeURIComponent(providerType)}/${uuid}/credits`);
+            } else {
+                throw err;
+            }
+        }
+        // 如果 credits 返回了邮箱且当前 customName 为空 / 不一致，自动写回
+        const fetchedEmail = data?.credits?.email;
+        if (fetchedEmail) {
+            const current = currentProviders.find(p => p.uuid === uuid);
+            const currentName = (current?.customName || '').trim();
+            if (currentName !== fetchedEmail) {
+                try {
+                    await window.apiClient.put(
+                        `/providers/${encodeURIComponent(providerType)}/${uuid}`,
+                        { providerConfig: { customName: fetchedEmail } }
+                    );
+                    showToast(t('common.success'), `已将节点名称更新为: ${fetchedEmail}`, 'success');
+                    await refreshProviderConfig(providerType);
+                } catch (updateErr) {
+                    console.warn('Failed to auto-update customName:', updateErr);
+                }
+            }
+        }
+
+        showKiroCreditsModal(data, uuid);
+    } catch (error) {
+        console.error('Failed to query Kiro credits:', error);
+        showToast(t('common.error'), 'Credits 查询失败: ' + (error.message || error), 'error');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = originalHtml;
+        }
+    }
+}
+
+function showKiroCreditsModal(data, uuid) {
+    const c = data.credits || {};
+    const planType = c.planType || 'UNKNOWN';
+    const isFree = /free/i.test(planType);
+    const email = c.email || '-';
+    const bonus = c.bonusCredits;
+    const plan = c.planCredits;
+    const daysUntilReset = c.daysUntilReset || 0;
+
+    const bar = (used, total, color) => {
+        const pct = total > 0 ? Math.min(100, Math.round(used / total * 100)) : 0;
+        return `<div style="background:var(--bg-secondary);border-radius:6px;height:8px;overflow:hidden;margin-top:6px;border:1px solid var(--border-color);">
+            <div style="background:${color};height:100%;width:${pct}%;transition:width .3s;"></div>
+        </div>`;
+    };
+
+    let bonusHtml = '';
+    if (bonus) {
+        bonusHtml = `
+            <div style="margin-top:16px;">
+                <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--text-secondary);">
+                    <span><i class="fas fa-gift"></i> Bonus Credits${bonus.status ? ` <span style="font-size:11px;color:var(--text-tertiary);">(${bonus.status})</span>` : ''}</span>
+                    <span><strong>${bonus.used}</strong> / ${bonus.total} (${bonus.percentage}%)</span>
+                </div>
+                ${bar(bonus.used, bonus.total, '#10b981')}
+                <div style="font-size:12px;color:var(--text-tertiary);margin-top:4px;">
+                    剩余 <strong>${bonus.remaining}</strong>，${bonus.daysLeft} 天后重置
+                </div>
+            </div>
+        `;
+    }
+
+    let planHtml = '';
+    if (plan) {
+        planHtml = `
+            <div style="margin-top:16px;">
+                <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--text-secondary);">
+                    <span><i class="fas fa-medal"></i> Plan Credits</span>
+                    <span><strong>${plan.used}</strong> / ${plan.covered} (${plan.percentage}%)</span>
+                </div>
+                ${bar(plan.used, plan.covered, '#3b82f6')}
+                <div style="font-size:12px;color:var(--text-tertiary);margin-top:4px;">
+                    剩余 <strong>${plan.remaining}</strong>
+                </div>
+            </div>
+        `;
+    }
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.style.display = 'flex';
+    modal.style.zIndex = '4000';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width:520px;width:90%;padding:20px;border-radius:12px;background:var(--bg-primary);border:1px solid var(--border-color);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <h3 style="margin:0;font-size:16px;color:var(--text-primary);"><i class="fas fa-wallet"></i> Kiro Credits</h3>
+                <button class="kiro-credits-close" style="border:none;background:transparent;cursor:pointer;font-size:18px;color:var(--text-secondary);padding:4px 8px;">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div style="font-size:13px;color:var(--text-primary);line-height:1.7;">
+                <div><strong>邮箱:</strong> ${email}</div>
+                <div><strong>套餐:</strong>
+                    <span class="badge ${isFree ? 'badge-secondary' : 'badge-success'}" style="margin-left:6px;padding:2px 8px;border-radius:4px;font-size:12px;background:${isFree ? 'var(--bg-secondary)' : '#10b981'};color:${isFree ? 'var(--text-primary)' : '#fff'};">${planType}</span>
+                </div>
+                <div><strong>距下次重置:</strong> ${daysUntilReset} 天</div>
+                ${bonusHtml}
+                ${planHtml}
+                <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border-color);font-size:12px;color:var(--text-tertiary);display:flex;justify-content:space-between;">
+                    <span>总用量: ${c.totalUsed || 0} / ${c.totalAvailable || 0}</span>
+                    <span>UUID: ${uuid.slice(0, 8)}...</span>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelector('.kiro-credits-close').onclick = () => modal.remove();
+    modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+}
+
 // 导出所有函数，并挂载到window对象供HTML调用
 export {
     showProviderManagerModal,
@@ -2229,7 +2530,8 @@ export {
     renderNotSupportedModelsSelector,
     goToProviderPage,
     performSingleHealthCheck,
-    refreshProviderUuid
+    refreshProviderUuid,
+    viewKiroCredits
 };
 
 // 将函数挂载到window对象
@@ -2250,3 +2552,4 @@ window.refreshUnhealthyUuids = refreshUnhealthyUuids;
 window.openSupportedModelsPicker = openSupportedModelsPicker;
 window.goToProviderPage = goToProviderPage;
 window.refreshProviderUuid = refreshProviderUuid;
+window.viewKiroCredits = viewKiroCredits;

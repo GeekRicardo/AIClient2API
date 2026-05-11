@@ -9,8 +9,11 @@ services:
     volumes:
       # 从项目根目录挂载 configs，使用绝对路径确保正确
       - ../configs:/app/configs
-      # 挂载源代码以支持热重载，但保留 node_modules
+      # 挂载源代码以支持热重载，但保留 node_modules 和 tls-sidecar 二进制
       - ../src:/app/src:ro
+      - ../static:/app/static:ro
       - ../package.json:/app/package.json:ro
+      - ../healthcheck.js:/app/healthcheck.js:ro
+      - ../VERSION:/app/VERSION:ro
     # 使用 shell form 以支持 $ARGS 展开
     command: ["sh", "-c", "node --watch src/core/master.js $ARGS"]
