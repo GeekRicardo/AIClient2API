@@ -200,16 +200,12 @@ function getContextTokensForModel(model, config = {}, fallbackModel = null) {
 // 从 provider-models.js 获取支持的模型列表（全集，对外暴露的就是这个）
 const KIRO_MODELS = getProviderModels(MODEL_PROVIDER.KIRO_API);
 
-// Kiro Free 套餐可用模型白名单（按 Kiro 公开定价推断；如有调整改这里即可）
-// 详见 https://kiro.dev/pricing （Free Tier vs Pro）
-// 其余 Opus / Sonnet 4-6 / 4-7 等高端模型仅 Pro 套餐可用
+// Kiro Free 套餐可用模型白名单（实测验证：FREE 账号 + PRO 账号交叉发推理请求 200 OK）
+// 其余 Opus / Sonnet 4-6 等模型 FREE 账号会被 Kiro 拒绝（仅 PRO/付费可用）
 const KIRO_FREE_TIER_MODELS = [
     'claude-haiku-4-5',
-    'claude-haiku-4-5-20251001',
     'claude-sonnet-4-5',
     'claude-sonnet-4-5-20250929',
-    'claude-sonnet-4-20250514',
-    'claude-3-7-sonnet-20250219',
 ];
 
 /**
