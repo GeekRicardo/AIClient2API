@@ -820,6 +820,68 @@ async function _handleDisableEnableProvider(req, res, currentConfig, providerPoo
 }
 
 /**
+ * 强制刷新所有 provider 的 token（绕过 refreshCount>=5 锁定）
+ * 用途：一晚上无请求导致全部 accessToken expired + refresh 计数器满载时手动挽救
+ */
+export async function handleForceRefreshAllTokens(req, res, currentConfig, providerPoolManager, providerType) {
+    try {
+        if (!providerPoolManager) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'Provider pool manager not initialized' } }));
+            return true;
+        }
+
+        const providers = providerPoolManager.providerStatus[providerType] || [];
+        if (providers.length === 0) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: `No providers found for type: ${providerType}` } }));
+            return true;
+        }
+
+        logger.info(`[UI API] Force-refresh all tokens for ${providerType} (${providers.length} providers)`);
+
+        let enqueued = 0;
+        let skipped = 0;
+        const results = [];
+        for (const providerStatus of providers) {
+            const cfg = providerStatus.config;
+            // 重置计数器，让 enqueue 不会被 refreshCount>=5 拦截
+            cfg.refreshCount = 0;
+            if (cfg.isDisabled) {
+                skipped++;
+                results.push({ uuid: cfg.uuid, status: 'skipped', reason: 'disabled' });
+                continue;
+            }
+            try {
+                // force=true 走 _enqueueRefreshImmediate 路径，且 _refreshNodeToken 内 force 参数也为 true
+                providerPoolManager._enqueueRefresh(providerType, providerStatus, true);
+                enqueued++;
+                results.push({ uuid: cfg.uuid, customName: cfg.customName || null, status: 'enqueued' });
+            } catch (e) {
+                results.push({ uuid: cfg.uuid, status: 'error', error: e.message });
+            }
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            providerType,
+            total: providers.length,
+            enqueued,
+            skipped,
+            results,
+            message: `已强制将 ${enqueued} 个 provider 加入刷新队列，请等待 5-30 秒后刷新页面`
+        }));
+        return true;
+    } catch (error) {
+        logger.error('[UI API] Force-refresh all tokens error:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: error.message } }));
+        return true;
+    }
+}
+
+/**
  * 重置特定提供商类型的所有提供商健康状态
  */
 export async function handleResetProviderHealth(req, res, currentConfig, providerPoolManager, providerType) {

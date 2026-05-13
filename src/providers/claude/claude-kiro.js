@@ -2085,18 +2085,29 @@ async saveCredentialsToFile(filePath, newData) {
             delete requestBody._requestBaseUrl;
         }
         
-        // 检查 token 是否即将过期，如果是则推送到刷新队列
-        if (this.isExpiryDateNear()) {
+        // 检查 token 是否即将过期/已过期
+        // - 已过期：必须同步刷新，否则下面用过期 token 调 API 会 403
+        // - 仅"接近过期"：异步入队即可
+        if (this.isTokenExpired()) {
+            logger.info('[Kiro] Token already expired, refreshing synchronously before request...');
+            try {
+                await this.initializeAuth(true); // 强制刷新，等待完成
+                logger.info('[Kiro] Synchronous refresh succeeded, proceeding with request');
+            } catch (refreshErr) {
+                logger.error(`[Kiro] Synchronous refresh failed: ${refreshErr.message}, falling back to async mark`);
+                this._markCredentialNeedRefresh('Token expired, sync refresh failed: ' + refreshErr.message);
+            }
+        } else if (this.isExpiryDateNear()) {
             logger.info('[Kiro] Token is near expiry, marking credential as need refresh...');
             this._markCredentialNeedRefresh('Token near expiry in generateContent');
         }
-        
+
         const finalModel = MODEL_MAPPING[model] ? model : model;
         logger.info(`[Kiro] Calling generateContent with model: ${finalModel}`);
-        
+
         // Estimate input tokens before making the API call
         const inputTokens = this.estimateInputTokens(requestBody);
-        
+
         const response = await this.callApi('', finalModel, requestBody);
 
         try {
@@ -2437,8 +2448,16 @@ async saveCredentialsToFile(filePath, newData) {
             delete requestBody._requestBaseUrl;
         }
         
-        // 检查 token 是否即将过期，如果是则推送到刷新队列
-        if (this.isExpiryDateNear()) {
+        // 已过期：同步刷新；接近过期：异步入队
+        if (this.isTokenExpired()) {
+            logger.info('[Kiro] Token already expired in stream, refreshing synchronously...');
+            try {
+                await this.initializeAuth(true);
+            } catch (refreshErr) {
+                logger.error(`[Kiro] Synchronous refresh failed in stream: ${refreshErr.message}`);
+                this._markCredentialNeedRefresh('Token expired, sync refresh failed: ' + refreshErr.message);
+            }
+        } else if (this.isExpiryDateNear()) {
             logger.info('[Kiro] Token is near expiry, marking credential as need refresh...');
             this._markCredentialNeedRefresh('Token near expiry in generateContentStream');
         }

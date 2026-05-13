@@ -439,6 +439,10 @@ function showProviderManagerModal(data, initialSearchTerm = '') {
                         <button class="btn btn-info" onclick="window.performHealthCheck('${providerType}')" data-i18n="modal.provider.healthCheck" title="对不健康节点执行健康检测">
                             <i class="fas fa-stethoscope"></i> 检测不健康
                         </button>
+                        ${/kiro/i.test(providerType) ? `
+                        <button class="btn btn-warning" onclick="window.forceRefreshAllTokens('${providerType}')" title="强制刷新所有节点的 accessToken（绕过 refreshCount>=5 锁，挽救夜间过期）">
+                            <i class="fas fa-sync"></i> 强制刷新 Token
+                        </button>` : ''}
                         <button class="btn btn-secondary" onclick="window.refreshUnhealthyUuids('${providerType}')" data-i18n="modal.provider.refreshUnhealthyUuids" title="刷新不健康节点的UUID">
                             <i class="fas fa-sync-alt"></i> <span data-i18n="modal.provider.refreshUnhealthyUuidsBtn">刷新UUID</span>
                         </button>
@@ -2379,6 +2383,30 @@ function renderNotSupportedModelsSelector(uuid, models, notSupportedModels = [])
 }
 
 /**
+ * 强制刷新指定 provider 类型下所有节点的 accessToken（绕过 refreshCount 锁）
+ */
+async function forceRefreshAllTokens(providerType) {
+    if (!confirm(`将对所有 ${providerType} 节点强制刷新 accessToken（绕过失败次数限制），继续？`)) return;
+    try {
+        showToast(t('common.info'), '正在派发刷新任务...', 'info');
+        const resp = await window.apiClient.post(
+            `/providers/${encodeURIComponent(providerType)}/refresh-all-tokens`,
+            {}
+        );
+        if (resp.success) {
+            showToast(t('common.success'), `已派发 ${resp.enqueued}/${resp.total} 个刷新任务，${resp.skipped} 个跳过。5-30 秒后会陆续完成。`, 'success');
+            // 10 秒后自动刷新一次列表
+            setTimeout(() => refreshProviderConfig(providerType), 10000);
+        } else {
+            showToast(t('common.error'), '刷新失败: ' + JSON.stringify(resp).slice(0, 150), 'error');
+        }
+    } catch (error) {
+        console.error('Force refresh all tokens failed:', error);
+        showToast(t('common.error'), '请求失败: ' + (error.message || error), 'error');
+    }
+}
+
+/**
  * 查询并展示 Kiro provider 的 credits / 套餐 / 重置天数
  * 若首次查询时 service 实例未初始化，会先触发一次健康检测再重试
  */
@@ -2547,7 +2575,8 @@ export {
     goToProviderPage,
     performSingleHealthCheck,
     refreshProviderUuid,
-    viewKiroCredits
+    viewKiroCredits,
+    forceRefreshAllTokens
 };
 
 // 将函数挂载到window对象
@@ -2569,3 +2598,4 @@ window.openSupportedModelsPicker = openSupportedModelsPicker;
 window.goToProviderPage = goToProviderPage;
 window.refreshProviderUuid = refreshProviderUuid;
 window.viewKiroCredits = viewKiroCredits;
+window.forceRefreshAllTokens = forceRefreshAllTokens;

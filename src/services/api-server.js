@@ -373,6 +373,32 @@ async function startServer() {
         if (poolManager) {
             logger.info('[Initialization] Performing initial health checks for provider pools...');
             poolManager.performInitialHealthChecks();
+
+            // 周期性主动刷新 OAuth 类 provider 的 token，避免一晚无请求导致全部 accessToken 过期
+            // 默认 30 分钟一次（Kiro/Gemini/Codex 等 accessToken 寿命通常 1 小时）
+            const OAUTH_PROVIDER_TYPES = ['claude-kiro-oauth', 'gemini-cli-oauth', 'gemini-antigravity', 'openai-codex-oauth', 'openai-qwen-oauth'];
+            const TOKEN_REFRESH_INTERVAL_MS = (CONFIG.OAUTH_TOKEN_REFRESH_INTERVAL_MIN || 30) * 60 * 1000;
+            setInterval(() => {
+                try {
+                    let totalEnqueued = 0;
+                    for (const type of OAUTH_PROVIDER_TYPES) {
+                        const providers = poolManager.providerStatus?.[type] || [];
+                        for (const status of providers) {
+                            const cfg = status.config;
+                            if (cfg.isDisabled) continue;
+                            cfg.refreshCount = 0; // 重置计数器避免被 >=5 锁死
+                            poolManager._enqueueRefresh(type, status, true);
+                            totalEnqueued++;
+                        }
+                    }
+                    if (totalEnqueued > 0) {
+                        logger.info(`[Periodic Token Refresh] Enqueued ${totalEnqueued} OAuth provider(s) for proactive refresh`);
+                    }
+                } catch (e) {
+                    logger.error('[Periodic Token Refresh] error:', e.message);
+                }
+            }, TOKEN_REFRESH_INTERVAL_MS);
+            logger.info(`[Initialization] OAuth token periodic refresh scheduled every ${TOKEN_REFRESH_INTERVAL_MS / 60000} min`);
         }
 
         // 定时健康检查

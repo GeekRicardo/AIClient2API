@@ -178,6 +178,14 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         return await providerApi.handleHealthCheck(req, res, currentConfig, providerPoolManager, providerType);
     }
 
+    // Force-refresh tokens for ALL providers of a type (绕过 refreshCount>=5 锁，用于挽救一晚上无请求导致全部 expired 的情况)
+    // NOTE: must be before the generic /{providerType}/{uuid} route
+    const refreshAllTokensMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/refresh-all-tokens$/);
+    if (method === 'POST' && refreshAllTokensMatch) {
+        const providerType = decodeURIComponent(refreshAllTokensMatch[1]);
+        return await providerApi.handleForceRefreshAllTokens(req, res, currentConfig, providerPoolManager, providerType);
+    }
+
     // Detect available models for a specific provider node
     const detectModelsMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/([^\/]+)\/detect-models$/);
     if (method === 'POST' && detectModelsMatch) {
